@@ -488,7 +488,11 @@ def build_conso(wb):
                     value=f'=IF(ROW()-1<=ROWS(tPresences),'
                           f'INDEX(tPresences[{src[h]}],ROW()-1),"")')
     last = 1 + NB_TEMPLATE_ROWS
-    add_table(ws, "tConso", 1, len(headers), last)
+    # IMPORTANT : la table se nomme CONSO_Presences (et non tConso) car toutes les
+    # formules aval (DA[Nb_Je_consommes], Suivi[Nb_journees], Cockpit) la référencent
+    # par CONSO_Presences[colonne] — conformément à la spec §3.4/§4.6. Un nom tConso
+    # rendrait ces références #NAME?. (corrigé en QA)
+    add_table(ws, "CONSO_Presences", 1, len(headers), last)
     autosize(ws, headers, 14)
     ws.freeze_panes = "A2"
     fmt_text_column(ws, 7, last)
@@ -581,7 +585,8 @@ def build_suivi(wb):
     fmt_text_column(ws, headers.index("N_DE_FACTURE") + 1, last)
     fmt_text_column(ws, headers.index("DA") + 1, last)
     fmt_date_columns(ws, [headers.index(c) + 1 for c in
-                          ("Date_facture", "Date_debut", "Date_fin", "Date_depot")], last)
+                          ("Date_facture", "Date_debut", "Date_fin", "Date_depot",
+                           "Date_naissance")], last)
 
     # validations
     add_dv(ws, "nrSemaine", f"C2:C{last}")
@@ -686,6 +691,13 @@ def build_facture(wb):
     ws["B21"].font = Font(name=ARIAL, size=11, bold=True)
     lbl("A22", "Montant en lettres :")
     val("B22", '=IF(B21="","",MontantEnLettres(B21)&" FRANCS CFP")')
+
+    # Formats d'affichage (sinon les dates issues de XLOOKUP s'affichent en n° de série).
+    ws["B7"].number_format = "DD/MM/YYYY"     # Né(e) le
+    ws["B12"].number_format = "DD/MM/YYYY"    # Date de facture
+    ws["B18"].number_format = "# ##0"         # Tarif unitaire (XPF entier)
+    ws["B19"].number_format = "0"             # Nb de journées
+    ws["B21"].number_format = "# ##0"         # TOTAL
 
     note(ws, 24,
          "[à affiner en QA] Le montant en lettres utilise la LAMBDA 'MontantEnLettres' "
