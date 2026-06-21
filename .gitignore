@@ -1,14 +1,6 @@
-# --- Données sensibles : ne JAMAIS committer (RGPD - PF depuis juin 2019) ---
-# Fichiers source contenant des données patients (même anonymisées)
 fichiers_source/
+build/_audit/
+output/
 *.xlsx
 *.xlsm
-
-# Audits bruts : peuvent contenir des valeurs d'exemple nominatives
-build/_audit/
-
-# --- Divers ---
-__pycache__/
-*.pyc
-.DS_Store
 ~$*
