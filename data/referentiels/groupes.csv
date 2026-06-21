@@ -1,0 +1,47 @@
+Groupe
+BEP x3
+CH POST-A
+G1+2+3+4-21NC
+G1-23 CHIR
+G1-23 NC
+G1-24
+G2-23 NC
+G2-24
+G3-23 NC
+G3-24
+G4+5-22NC
+G4-23 CHIR
+G4-23 NC
+G4-24
+G5-23 NC
+G5-24
+G6-22-NC
+Int 2-24
+Int 3-24
+Int 4-24
+Int 5-24
+Int G10-24
+Int G11-24
+Int G12-24
+Int G13-24
+Int G14-24
+Int G15-24
+Int G16-24
+Int G17-24
+Int G18-24
+Int G19-24
+Int G20-24
+Int G21-24
+Int G22-24
+Int G23-24
+Int G24-24
+Int G25-24
+Int G26-24
+Int G27-24
+Int G28-24
+Int G7-24
+Int G8-24
+Int G9-24
+Post-int G14+15-24
+Post-int G16-24-18-24
+Rattrapage

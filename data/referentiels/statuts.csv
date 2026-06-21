@@ -1,0 +1,12 @@
+Statut;Exclu_facturation
+CPH prévu;FAUX
+CPH fait;FAUX
+DEP postée;FAUX
+DEP validée;FAUX
+BEP fait;FAUX
+DEP refusée;VRAI
+DEP annulée;VRAI
+Refus centre;VRAI
+Refus CPS;VRAI
+Attente;FAUX
+Auto-financement;FAUX
