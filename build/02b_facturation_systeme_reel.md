@@ -105,9 +105,14 @@ fichiers GP. Points de rupture vérifiés :
 | `Param` | `TabTarif` | **Tarifs** | 5 forfaits (voir §5) |
 | `TabCalendrier` | — | calendrier | date → semaine |
 
-**Macros VBA** : présentes (`vbaProject.bin`) — rôle **probable `[à confirmer]`** : actualisation des requêtes,
-génération/impression des bordereaux et factures, navigation. **Code non encore lu** (nécessite un extracteur
-type `oletools/olevba` — à autoriser si l'analyse du VBA est souhaitée).
+**Macros VBA** (extraites et lues via `olevba`) : **anodines**. 14 modules dont 13 sont des modules de feuille
+**vides** (boilerplate). Le seul code réel, `Module1`, est un utilitaire **autonome** de conversion d'un nombre
+en lettres françaises (`ConvNumberLetter`/`ConvNumEnt`/`ConvNumDizaine`/`ConvNumCent`) — usage typique : écrire le
+**montant en toutes lettres sur la facture**. **Aucune macro ne pilote** le déversement, l'actualisation des
+requêtes, ni la génération des bordereaux : toute la logique de facturation est en **Power Query + formules de
+feuille** (l'actualisation se fait par le bouton natif « Actualiser tout »). → La facturation est **entièrement
+reproductible sans VBA** ; la fonction « montant en lettres » peut être reportée à l'identique (ou en option) si
+le modèle de facture l'exige.
 
 ---
 
