@@ -1,497 +1,532 @@
-# 03 — Architecture cible du classeur unique `ORA_ORA_SSR.xlsx` (SSR Polynésie, facturation CPS)
+# 03 — Architecture cible du classeur unique `ORA_ORA_SSR.xlsx` (v2 — couche Facturation intégrée)
 
-**Objet.** Spécification d'architecture du **classeur Excel unique** qui remplace les 4 fichiers actuels
-(`EXCEL_ETP`, `GP_ETP_1`, `EXCEL_POLYVALENT`, `EXCEL_PRESENCE_SRR`), en corrigeant **par construction**
-chacune des 10 ruptures diagnostiquées (`build/02_flux_et_diagnostic.md`, R1→R10). Ce document est une
-**conception sur le papier** : il ne construit pas le `.xlsx`. Il est destiné à l'agent CONSTRUCTEUR, qui
-doit pouvoir l'implémenter sans réinterpréter. Il se conforme au contrat fixé par `CLAUDE.md` (couches,
-noms d'onglets, jointure présence↔accord, contrainte openpyxl≠Power Query, 5 cotations, Definition of Done §9)
-et le précise. Toute hypothèse non vérifiée est marquée `[à confirmer]` ; toute divergence éventuelle au
-CLAUDE.md serait marquée `[arbitrage métier requis]`.
+**Objet.** Spécification d'architecture du **classeur Excel unique** qui remplace les 5 fichiers actuels
+(`EXCEL_ETP`, `GP_ETP_1`, `EXCEL_POLYVALENT`, `EXCEL_PRESENCE_SRR`, **et le fichier de facturation
+`Tableau_suivi_Factures_CPS_2025.xlsm`**), en corrigeant **par construction** chacune des 11 ruptures
+diagnostiquées (`build/02_flux_et_diagnostic.md` R1→R10 + `build/02b_facturation_systeme_reel.md` **R11**).
+Ce document est une **conception sur le papier** : il ne construit pas le `.xlsx`. Il est destiné à l'agent
+CONSTRUCTEUR, qui doit pouvoir l'implémenter sans réinterpréter. Il se conforme au contrat fixé par `CLAUDE.md`
+(couches, noms d'onglets, jointure présence↔accord, contrainte openpyxl≠Power Query, 5 cotations, Definition of
+Done §9) et le précise. Toute hypothèse non vérifiée est marquée `[à confirmer]` ; tout arbitrage métier ouvert
+est marqué `[arbitrage]`.
+
+> **Révision v2.** Cette version **écrase** la v1. Elle intègre trois apports découverts après la v1 :
+> 1. le **vrai système de facturation** (fichier `.xlsm`, analysé dans `02b`) — Power Query inter-fichiers
+>    `Z:\…`, suivi `TabSuiviApi`, bordereaux, modèle de facture imprimable, tarifs réels `TabTarif` ;
+> 2. le **référentiel patient réel** `GP_PATIENTS.xlsx` (feuille `Patients `, ≈1 102 patients, clé `Recherche`) ;
+> 3. le **diagnostic corrigé** : **R11 🔴** (déversement = Power Query inter-fichiers, cause n°1 du désalignement)
+>    et la **requalification de R2** (transfert automatique par PQ, pas manuel).
+>
+> **Décisions déjà validées et intégrées (ne pas re-questionner)** :
+> - **Moteur = les DEUX** : formules dynamiques natives (`FILTRE`/`RECHERCHEX`/`LET` + clé patient normalisée)
+>   pour une v1 100 % scriptable openpyxl, **avec** le code M Power Query fourni en parallèle (documenté) comme
+>   évolution.
+> - **Colonne `Parcours` ajoutée à la saisie** (4e champ, liste {ETP, Polyvalent}).
+> - **Validation patient = avertir sans bloquer** (nom hors-liste → `⚠ HORS LISTE` en rouge, saisie autorisée).
+> - **Source ETP maître = `GP_ETP_1.xlsx`** (= « GP ETP.xlsx »).
+> - **Objectif réaffirmé** : UN SEUL fichier Excel regroupant TOUTES les fonctions de facturation
+>   (référentiels + DA + saisie présences + consolidation + suivi factures + bordereaux + facture imprimable +
+>   tarifs).
 
 ---
 
 ## 1. Synthèse exécutive
 
-**Principe cible.** Un seul `.xlsx`, organisé en couches (Référentiels → Registre `DA` → Saisie présences →
-Consolidation → Facturation → Pilotage). L'assistante saisit toujours **3 champs** (Patient, Date,
-Programmation) ; tout le reste — N° DA, cotation, régime, Nb Je accordés, PEC, groupe, semaine — se calcule.
-La chaîne fragile actuelle (recopier-coller inter-fichiers, jointure par nom de patient brut, `IFERROR` qui
-masque les erreurs) est remplacée par une **plomberie intégrée intra-classeur** : une source unique par
-donnée, une **clé patient normalisée** systématique avant toute jointure, et des gardes d'erreur qui
-**signalent en rouge** au lieu de masquer.
+**Principe cible.** Un seul `.xlsx`, organisé en couches
+(Référentiels → Registre `DA` → Saisie présences → Consolidation → **Facturation complète** → Pilotage).
+L'assistante saisit toujours **3 champs métier** (Patient, Date, Programmation) + **1 champ de discrimination**
+(`Parcours`) ; tout le reste — N° DA, cotation, régime, Nb Je accordés, PEC, groupe, semaine, **puis montant,
+bordereau, facture** — se calcule. La chaîne fragile actuelle (Power Query inter-fichiers `Z:\…`, jointure par
+nom de patient brut, `IFERROR`/`SIERREUR` qui masquent les erreurs) est remplacée par une **plomberie intégrée
+intra-classeur** : une source unique par donnée, une **clé patient normalisée** systématique avant toute
+jointure, et des gardes d'erreur qui **signalent en rouge** au lieu de masquer.
 
-**Décision moteur de jointure — formules dynamiques natives robustifiées (recommandé pour v1).**
+**Le saut de la v2 : la facturation entre dans le fichier.** Le « déversement automatique » que décrit
+l'établissement est en réalité un **Power Query inter-fichiers** lisant `Z:\2 PLANNIF & PROGRAMMATION\GESTION DES
+PATIENTS\GP ETP.xlsx`, `GP POLYVALENT.xlsx`, `GP Patients.xlsx`, et alimentant un `.xlsm` de facturation (7
+requêtes M, suivi `TabSuiviApi`, bordereaux, facture, tarifs). Ce dispositif est **automatique mais fragile** :
+positionné/typé **par nom de table et de colonne exact** sur des fichiers externes au format instable (espaces
+d'en-tête, dernière colonne divergente ETP↔Poly, chemin réseau `Z:`). C'est la **cause n°1 du désalignement**
+(R11). **En ramenant la facturation dans le même classeur que la saisie, le Power Query inter-fichiers disparaît
+de la chaîne critique** : les jointures deviennent **intra-classeur** par référence structurée, et la cause R11
+s'éteint par construction.
+
+**Décision moteur de jointure — formules dynamiques natives robustifiées (v1) + Power Query documenté (évolution).**
 Le CONSTRUCTEUR bâtit en **openpyxl, qui ne sait pas écrire Power Query** (CLAUDE.md §5). Pour livrer une v1
-**100 % scriptable, sans aucune étape manuelle bloquante**, la jointure présence↔accord est réalisée en
-**formules dynamiques Excel 365** (`FILTER` + `XLOOKUP`) appuyées sur des **colonnes d'aide de clé
-normalisée** (`TRIM` + réduction des espaces multiples + casse homogène — la « règle d'or anti-rupture »
-du CLAUDE.md §4). Le calcul est donc **natif et auto-rafraîchi à chaque ouverture/F9**, sans bouton ni
-import manuel. Compromis assumé : Power Query offrirait un rafraîchissement encore plus propre et des
-volumes plus confortables, mais imposerait une étape manuelle de collage de code M dans l'Éditeur avancé
-hors de portée d'openpyxl. **Power Query est donc fourni comme évolution ultérieure documentée** (code M
-séparé, `powerquery/*.pq`), pas comme dépendance de livraison v1. Voir §4 pour les formules exactes et §8
-pour le plan de bascule.
+**100 % scriptable, sans étape manuelle bloquante**, toutes les jointures (présence↔accord, présence↔calendrier,
+suivi↔DA, suivi↔patient, suivi↔tarif) sont réalisées en **formules dynamiques Excel 365** (`FILTRE` + `RECHERCHEX`
++ `LET`) appuyées sur des **colonnes d'aide de clé normalisée** (la « règle d'or anti-rupture » du CLAUDE.md §4).
+Calcul **natif et auto-rafraîchi** à chaque ouverture/F9, sans bouton ni import manuel. **Power Query est fourni
+comme évolution ultérieure documentée** (code M `powerquery/*.pq`, transposé en jointures **intra-classeur** —
+plus jamais sur `Z:\…`), pas comme dépendance de livraison v1.
 
-**Ce que ça corrige.** Source unique (fin du double fichier ETP — R3) ; volet Polyvalent réintégré dans une
-table de consolidation unique pilotée par `Parcours` (R1) ; transfert manuel supprimé, tout est formule
-intra-classeur (R2) ; clé patient normalisée avant jointure (R7) ; `#REF!` éliminé par reconstruction de la
-colonne d'âge sur le référentiel patient (R4) ; doublons `N° DA` et `N° DA+Date` détectés et signalés
-(R6, R10) ; présences sans accord signalées en rouge, jamais silencieusement vides (R8) ; clés tronquées/
-orphelines repérées (R9) ; `#VALUE!` supprimés (R5). Détail complet en §7.
+**Ce que ça corrige.** Source unique (fin du double fichier ETP — R3) ; volet Polyvalent réintégré par la colonne
+`Parcours` (R1) ; transfert PQ inter-fichiers supprimé, tout est intra-classeur (R2, **R11**) ; clé patient
+normalisée avant jointure (R7) ; `#REF!` éliminés (R4 dans DA, **et les 443 `#REF!` de la colonne Q parasite de
+`GP_PATIENTS`**) ; doublons `N° DA` et `N° DA+Date` détectés et signalés (R6, R10) ; présences sans accord
+signalées en rouge (R8) ; `#VALUE!`/`#N/A`/`#REF!` du `.xlsm` (28 erreurs littérales + 5 plages nommées cassées)
+supprimés (R5). Détail complet en §8.
 
 ---
 
-## 2. Carte des onglets du classeur unique
+## 2. Carte des onglets du classeur unique (v2)
 
-Noms d'onglets **contractuels** (CLAUDE.md §3). « Source d'origine » = fichier(s) parmi les 4 dont la donnée
-provient. « Alimentation » = comment l'onglet se remplit dans la cible.
+Noms d'onglets **contractuels** (CLAUDE.md §3), enrichis de la **couche Facturation**. « Source d'origine » = vrai
+mapping des fichiers réels (cf. `02b` §1). « Alimentation » = comment l'onglet se remplit dans la cible.
 
-| # | Onglet | Couche | Rôle | Qui écrit | Source d'origine (4 fichiers) | Alimentation cible |
+**Mapping des fichiers réels (rappel `02b`)** : `GP ETP.xlsx` = **`GP_ETP_1`** (maître ETP, origine « Marion UNG ») ;
+`GP POLYVALENT.xlsx` = **`EXCEL_POLYVALENT`** ; `GP Patients.xlsx` = **`GP_PATIENTS`** (désormais FOURNI) ;
+facturation = **`Tableau_suivi_Factures_CPS_2025.xlsm`** ; `EXCEL_PRESENCE_SRR` = **ancienne consolidation
+obsolète** (abandonnée) ; `EXCEL_ETP` = copie/export d'ETP (abandonnée au profit de `GP_ETP_1`).
+
+| # | Onglet | Couche | Rôle | Qui écrit | Source d'origine (réelle) | Alimentation cible |
 |---|---|---|---|---|---|---|
-| 1 | `REF_Patients` | Référentiel | Patients (clé Recherche = Nom+naissance) | Admin | `EXCEL_ETP!TabPatients␣` (2 157 clés) ∪ `DA[Patient]` | CSV seed → table figée |
-| 2 | `REF_Cotations` | Référentiel | 5 cotations + parcours + tarif | Admin | `Parametres!Cotation` | CSV seed |
-| 3 | `REF_Regimes` | Référentiel | Régimes + équivalences | Admin | `Parametres!Régimes` | CSV seed |
-| 4 | `REF_Pathologies` | Référentiel | Pathologies médicales / PMSI | Admin | `Parametres!Pathologies`,`Path`,`PMSI` | CSV seed |
-| 5 | `REF_Provenances` | Référentiel | Provenance + code + motif d'entrée UM | Admin | `Parametres!Provenance` | CSV seed |
-| 6 | `REF_Prescripteurs` | Référentiel | Prescripteurs (146) | Admin | `Parametres!Prescripteur` | CSV seed |
-| 7 | `REF_Statuts` | Référentiel | Statuts DA (12) + drapeau « exclu facturation » | Admin | `Parametres!Statut` | CSV seed |
-| 8 | `REF_Mouvements` | Référentiel | Mouvements | Admin | `Parametres!Mouvements` | CSV seed |
-| 9 | `REF_Programmation` | Référentiel | Programmation présence (9) + drapeau « compte présent » | Admin | `Parametres!Programmation` | CSV seed |
-| 10 | `REF_Groupes` | Référentiel | Groupes (48) | Admin | `EXCEL_ETP!TabGpes` | CSV seed |
-| 11 | `REF_Communes` | Référentiel | Communes + code postal | Admin | `Parametres!Commune` | CSV seed |
-| 12 | `REF_Motifs` | Référentiel | Motifs hospit / refus CPS / refus OraOra / annulation | Admin | `Parametres!Motifs *` | CSV seed |
-| 13 | `REF_Calendrier` | Référentiel | Date → semaine ISO / mois (2 193 dates) | Admin | `TabCalendrier` | CSV seed (ou formules) |
-| 14 | `DA` | Registre | Demandes d'accord / séjours, clé pivot **N° DA** | Assistantes | `EXCEL_ETP!DA` (994) ∪ `EXCEL_POLYVALENT!DA` (676) | Import unique → saisie |
-| 15 | `Saisie_Presences` | Saisie | Présences ; saisie = Patient + Date + Programmation | Assistantes | `*!Présences` (ETP+Poly) | Saisie + formules |
-| 16 | `CONSO_Presences` | Consolidation | Table unique ETP+Poly (colonne `Parcours`) | Formules (auto) | `Saisie_Presences` | Formules / [PQ ultérieur] |
-| 17 | `Facturation` | Facturation | Dossiers prêts à facturer + contrôles | Formules | `CONSO_Presences` + `DA` | Formules |
-| 18 | `Cockpit` | Pilotage | Compteurs réel + prévisionnel (ETP & Poly) | TCD | `CONSO_Presences` | TCD |
-| 19 | `CTRL_Qualite` | Pilotage | Zone d'alertes d'intégrité (compteurs d'anomalies) | Formules | tous | Formules |
+| 1 | `REF_Patients` | Référentiel | Patients (clé `Recherche`) + `Cle_Norm` | Admin | **`GP_PATIENTS!Patients `** (≈1 102) | CSV seed → table figée |
+| 2 | `REF_Cotations` | Référentiel | 5 cotations + parcours | Admin | `Parametres!Cotation` | CSV seed |
+| 3 | `REF_Tarifs` | Référentiel/Factu | **5 forfaits + tarifs réels** | Admin | **`.xlsm!Param`/`TabTarif`** | CSV seed `tarifs.csv` |
+| 4 | `REF_Regimes` | Référentiel | Régimes + équivalences + `Facturable_CPS` + `Payeur` | Admin | `Parametres!Régimes` | CSV seed |
+| 5 | `REF_Pathologies` | Référentiel | Pathologies médicales / PMSI | Admin | `Parametres!Pathologies`,`Path` | CSV seed |
+| 6 | `REF_Provenances` | Référentiel | Provenance + code + motif UM | Admin | `Parametres!Provenance` | CSV seed |
+| 7 | `REF_Prescripteurs` | Référentiel | Prescripteurs (146) | Admin | `Parametres!Prescripteur` | CSV seed |
+| 8 | `REF_Statuts` | Référentiel | Statuts DA (12) + `Exclu_facturation` | Admin | `Parametres!Statut` | CSV seed |
+| 9 | `REF_Mouvements` | Référentiel | Mouvements | Admin | `Parametres!Mouvements` | CSV seed |
+| 10 | `REF_Programmation` | Référentiel | Programmation (9) + `Compte_Present` | Admin | `Parametres!Programmation` | CSV seed |
+| 11 | `REF_Groupes` | Référentiel | Groupes (48) | Admin | `GP_ETP_1!TabGpes` | CSV seed |
+| 12 | `REF_Communes` | Référentiel | Communes + code postal | Admin | **`GP_PATIENTS!Parametres`** (56) | CSV seed |
+| 13 | `REF_Motifs` | Référentiel | Motifs hospit / refus CPS / refus OraOra / annulation | Admin | `Parametres!Motifs *` | CSV seed |
+| 14 | `REF_CategoriesRefus` | Référentiel/Factu | **Catégories de refus facturation** (`Droits fermés`, `JRS hors DA`, …) | Admin | **`.xlsm!TabSuiviApi[Catégorie de Refus]`** | CSV seed |
+| 15 | `REF_Calendrier` | Référentiel | Date → semaine ISO / mois (2 193 dates) | Admin | `TabCalendrier` | CSV seed (ou formules) |
+| 16 | `DA` | Registre | Demandes d'accord / séjours, clé pivot **N° DA** | Assistantes | `GP_ETP_1!DA` (994) ∪ `EXCEL_POLYVALENT!DA` (676) | Import unique → saisie |
+| 17 | `Saisie_Presences` | Saisie | Présences ; saisie = Patient + Date + Programmation + **Parcours** | Assistantes | `*!Présences` (ETP+Poly) | Saisie + formules |
+| 18 | `CONSO_Presences` | Consolidation | Table unique ETP+Poly (colonne `Parcours`) | Formules (auto) | `Saisie_Presences` | Formules / [PQ intra-classeur ultérieur] |
+| 19 | `Suivi_Factures` | **Facturation** | Registre de suivi (= `Recap Facturat° futur`/`TabSuiviApi`) : montant, refus, dépôt, paiement | Assistante factu + formules | **`.xlsm!Recap Facturat° futur`** | Formules + saisie |
+| 20 | `Bordereaux` | **Facturation** | Totaux par N° de facture / N° DA | Formules | **`.xlsm!Bordereaux (2)`** | Formules `SUMIFS` |
+| 21 | `Facture` | **Facturation** | Modèle imprimable (1 facture) | Formules + saisie | **`.xlsm!Facturation`** | Formules `RECHERCHEX` + (option VBA `ConvNumberLetter`) |
+| 22 | `Cockpit` | Pilotage | Compteurs réel + prévisionnel (ETP & Poly) | TCD | `CONSO_Presences` + `DA` | TCD |
+| 23 | `CTRL_Qualite` | Pilotage | Zone d'alertes d'intégrité (compteurs d'anomalies) | Formules | tous | Formules |
 
-> **Décision périmètre — abandons explicites** (§3 du brief) :
-> - **Double fichier ETP** : `GP_ETP_1.xlsx` abandonné ; **une seule source DA** (R3). Les `N° DA` étant
->   strictement identiques (994=994, 0 écart de données — R3), on importe depuis **un seul** fichier ETP.
->   `[arbitrage métier requis]` : confirmer que **`GP_ETP_1` (origine « Marion UNG », non réécrit par
->   openpyxl) est le maître** à importer plutôt que `EXCEL_ETP`.
-> - **Feuilles brouillon/extraction** abandonnées : `Détails1`, `Détails2`, `Détails JRS`, `Feuil1..Feuil5`,
->   `Tri 1`, `TCD Activité`, `GCC`, `SUIVI PI`, `DATA Presence ETP`, `Visu présences ETP/Poly`,
->   `Chiffres réel/prévisionnels`, `ANS REAL`, `MOIS REAL`, `JRS REAL/PREVI`. Justification : sorties figées,
->   TCD résiduels, doublons de synthèse — tous reconstruits proprement par `Cockpit` (TCD) et `CTRL_Qualite`.
-> - **Colonne `Age fixe séjour`** (DA col Y) **abandonnée telle quelle** (porteuse de `#REF!` sur ~quasi
->   toutes les lignes — R4) et **reconstruite** en `Age_sejour` calculée sur `REF_Patients` (§3, §7-R4).
-> - **`TabPresencePoly` vide** (R1) abandonnée : remplacée par la table unique `CONSO_Presences` filtrée
->   par `Parcours`.
-> - **`Colonne1`** (16e col. de Présences, sans en-tête utile) abandonnée.
+> **Décision périmètre — abandons explicites** :
+> - **Double fichier ETP** : `EXCEL_ETP.xlsx` abandonné ; **maître = `GP_ETP_1.xlsx`** (origine « Marion UNG »,
+>   non réécrit par openpyxl ; `N° DA` identiques 994=994, 0 écart de données — R3). **Décision validée.**
+> - **`EXCEL_PRESENCE_SRR.xlsx`** (ancienne consolidation manuelle, `TabPresencePoly` vide) **abandonné en bloc** :
+>   remplacé par `CONSO_Presences` (R1).
+> - **Power Query inter-fichiers `Z:\…`** du `.xlsm` (7 requêtes `TabDAETP`, `TabDAPolyvalent`, `TabDA`,
+>   `TabPresencesETP`, `TabPresencesPoly`, `TabPrésences`, `TabPatients`) **abandonné** : remplacé par des
+>   jointures **intra-classeur** (R11 — voir §6).
+> - **Feuilles de cache / brouillon / extraction** abandonnées (ETP/Poly : `Détails*`, `Feuil*`, `Tri 1`,
+>   `TCD Activité`, `GCC`, `SUIVI PI`, `DATA Presence ETP`, `Visu présences`, `Chiffres réel/prév.`, `*REAL/PREVI`).
+> - **Colonne `Age fixe séjour`** (DA col Y, `#REF!`) abandonnée et reconstruite (§3.2, R4).
+> - **Colonne Q parasite de `GP_PATIENTS`** (443 `#REF!`) **abandonnée** : non importée dans `REF_Patients` (§3.1).
+> - **5 plages nommées cassées du `.xlsm`** (`Liste_Clients`, `Liste_Prestations`, `Rech_Facture` = `#REF!` ;
+>   `Segment_N°_DE_FACTURE`, `Segment_N°_semaine` = `#N/A`) **non reportées** ; remplacées par des tables/segments
+>   propres pointant les `REF_*`.
+> - **`Colonne1`** (16e col. de Présences) abandonnée.
 >
-> **Ce qu'on garde** : registre `DA` (44 colonnes, dont on retient les utiles — §3), présences (3 champs
-> saisis), référentiels `Parametres` (éclatés en `REF_*` uniques), `TabCalendrier` (`REF_Calendrier`),
-> et le **pilotage par TCD** (reconstruit dans `Cockpit`).
+> **Ce qu'on garde** : registre `DA` (colonnes utiles), présences (3+1 champs saisis), référentiels `Parametres`
+> (éclatés en `REF_*` uniques), `TabCalendrier`, **tout le moteur de facturation** (suivi, bordereaux, facture,
+> tarifs), et le pilotage par TCD (`Cockpit`). La fonction VBA `ConvNumberLetter` (montant en lettres) est
+> conservée **en option** sur l'onglet `Facture`.
 
 ---
 
 ## 3. Dictionnaire de données par onglet clé
 
-Conventions : police Arial ; dates au format `JJ/MM/AAAA` ; `N° DA` en **texte** (préserver le zéro et le
-format `AA/NNNNNN`) ; tables nommées Excel (ListObjects) pour chaque onglet. Les colonnes **saisies** sont
-notées `[S]`, les **calculées** `[C]` (avec formule cible), les **importées/admin** `[A]`.
+Conventions : police Arial ; dates `JJ/MM/AAAA` ; `N° DA` en **texte** (préserver `AA/NNNNNN`) ; tables nommées
+Excel (ListObjects). Colonnes **saisies** `[S]`, **calculées** `[C]`, **importées/admin** `[A]`.
 
-### 3.1 Référentiels `REF_*` (verrouillés, admin only)
+### 3.1 `REF_Patients` — référentiel patient réel (`GP_PATIENTS!Patients `)
 
-Chaque `REF_*` est une **ListObject** d'une seule source de vérité ; les listes déroulantes pointent ces
-tables (fin des cibles INDIRECT multiples — R-nommage). Colonnes :
+Source : `GP_PATIENTS.xlsx`, feuille **`Patients `** (espace final ; en-têtes en **ligne 3**, table `Table_3`
+A3:N1104, ≈**1 102 patients**, 14 colonnes utiles A→N + **colonne Q parasite à abandonner**). La clé `Recherche`
+existe déjà dans la source (col M), reconstruite par formule :
 
-| Onglet | Table | Colonnes |
-|---|---|---|
-| `REF_Patients` | `tPatients` | `Recherche` (clé = Nom+naissance), `Nom`, `Prenom`, `DateNaissance`, **`Cle_Norm`** [C] (clé normalisée, voir §4) |
-| `REF_Cotations` | `tCotations` | `Cotation` (HJSR, HJST, HJSN, HJSA, HJSM), `Libelle` `[à confirmer]`, `Parcours_defaut` `[à confirmer]`, `Tarif_XPF` `[à confirmer JOPF]` (laissé vide à renseigner) |
-| `REF_Regimes` | `tRegimes` | `Regime` (RGS, RNS, RST, SS, Auto-financement), `Equivalence`, `Facturable_CPS` (booléen ; `[à confirmer]` mapping régime→CPS) |
-| `REF_Pathologies` | `tPathologies` | `Pathologie`, `Code_PMSI` `[à confirmer : PF sans PMSI — CLAUDE.md §7]` |
-| `REF_Provenances` | `tProvenances` | `Provenance`, `Code_provenance`, `Motif_entree_UM` |
-| `REF_Prescripteurs` | `tPrescripteurs` | `Prescripteur` |
-| `REF_Statuts` | `tStatuts` | `Statut`, **`Exclu_facturation`** [A] (booléen ; VRAI pour `DEP refusée`, `DEP annulée`, `Refus CPS`, `Refus centre` — voir §4 et §6) |
-| `REF_Mouvements` | `tMouvements` | `Mouvement` |
-| `REF_Programmation` | `tProgrammation` | `Programmation` (9 valeurs), **`Compte_Present`** [A] (booléen ; VRAI pour `Présent`, `Attente CPS / Présent`, `Refus PEC / Présent` `[à confirmer]`) |
-| `REF_Groupes` | `tGroupes` | `Groupe` |
-| `REF_Communes` | `tCommunes` | `Commune`, `Code_postal` |
-| `REF_Motifs` | `tMotifsHospit`, `tMotifsRefusCPS`, `tMotifsRefusOraOra`, `tMotifsAnnul` | une colonne libellé par table |
-| `REF_Calendrier` | `tCalendrier` | `Date`, `Annee`, `Mois`, `Semaine_ISO`, `No_Semaine` (ex. `S24-21`) |
+> `Recherche` (source) `= Nom & " " & Prénom & " " & SI(Prénom usuel="";"";"dit " & Prénom usuel & " ") & TEXTE(Date de naissance;"jj-mm-aaaa")`
+> (formule réelle relevée dans `GP_PATIENTS` ; idem dans `.xlsm!TabPatients`). **C'est la clé de jointure
+> patient de toute la facturation** (`.xlsm` fait `RECHERCHEX(Code recherche; TabPatients[Recherche]; …)`).
 
-> Valeurs vérifiées sur source : Cotation = {HJSA, HJSM, HJSN, HJSR, HJST} ; Régime = {RGS, RNS, RST, SS,
-> Auto-financement} ; Statut = {Attente, BEP fait, CPH fait, CPH prévu, DEP annulée, DEP postée, DEP refusée,
-> DEP validée, Refus CPS, Refus centre, Auto-financement} ; Programmation = {Présent, Prévu, Absent non
-> prévenu, Annulation, Attente CPS / Présent, Indispo a prévenu, Journée gratuite, Refus PEC / Présent, VAD}.
+| Table | Colonnes (importées `[A]` sauf indication) |
+|---|---|
+| `tPatients` | `Date_saisie`, `No_administratif`, `DN`, `Nom`, `Prenom`, `Prenom_usuel`, `Date_naissance`, `Sexe`, `Commune`, `Code_postal`, `Adresse`, `N_tel`, `Recherche` (clé), `PEC`, **`Cle_Norm`** [C] |
+
+- **`Cle_Norm`** [C] : clé normalisée (§5) appliquée à `Recherche` — utilisée pour toutes les jointures patient.
+- **Nettoyage à l'import** : **NE PAS importer la colonne Q** (parasite, **443 `#REF!`**). Recalculer `Recherche`
+  proprement (au lieu de figer le cache). La colonne `Code_postal` (J) est une `ArrayFormula` dans la source →
+  importer la **valeur**, pas la formule, ou la dériver de `REF_Communes` via `Commune`.
+- **`REF_Communes`** est alimenté par `GP_PATIENTS!Parametres` (feuille `Parametres`, table `Table_1` B3:C59,
+  56 communes : `Commune`/`Code_postal`) ; **`Sexe`** {F, M} depuis `Parametres!Table_2` (E3:E5).
+- Données patients réelles = **sensibles (RGPD-PF)** : seul un **CSV seed anonymisé** est committé (CLAUDE.md §2) ;
+  l'import des vraies données reste hors dépôt.
 
 ### 3.2 `DA` — registre des demandes d'accord (clé pivot `N° DA`)
 
-Le registre original a **44 colonnes**. On **retient les utiles** et on en **reconstruit** une (`Age_sejour`).
-Clé primaire = **`N° DA`** (col V d'origine), format texte `AA/NNNNNN`.
+Inchangé v1 dans son principe : on retient les colonnes utiles des 44 d'origine, on reconstruit `Age_sejour`
+(remplace `Age fixe séjour`/`#REF!`, R4) et `Nb_Je_consommes`. Clé primaire **`N_DA`** (texte `AA/NNNNNN`).
 
-**Colonnes retenues** (saisies `[S]` par l'assistante via listes déroulantes ; calculées `[C]`) :
+Colonnes saisies `[S]` (listes `REF_*`) : `N_DA`, `Patient`, `Parcours`, `Motif_Hospit`, `Pathologie_medicale`,
+`Regime`, `Provenance`, `Prescripteur`, `Date_demande`, `Statut`, `Mouvements`, `Nb_Je_demande`,
+`Cotation_demandee`, `Date_debut_demandee`, `Date_fin_demandee`, `Date_postage`, `Numero_sejour`, `PEC`,
+`Nb_Je_Accorde`, `Cotation_accordee`, **`Date_debut_accorde`** (borne basse jointure), **`Date_fin_accorde`**
+(borne haute), `Date_accord`, `Groupe`, `Programme`, `Date_FIN_PEC`.
+Colonnes calculées `[C]` : `Cle_Patient_Norm`, `Statut_Exclu`, `Age_sejour`, `Nb_Je_consommes`, `Doublon_N_DA`.
 
-| Col cible | Type | Statut | Origine (DA 44 col.) | Note |
-|---|---|---|---|---|
-| `N_DA` | texte | [S] | `N° DA` (V) | **clé pivot** ; unique requise |
-| `Patient` | texte | [S] | `Patient` (B) | liste = `REF_Patients[Recherche]` |
-| `Cle_Patient_Norm` | texte | [C] | — | clé normalisée (§4), utilisée pour les jointures |
-| `Parcours` | texte | [S] | `Parcours` (AP) | liste = {ETP, Polyvalent} |
-| `Motif_Hospit` | texte | [S] | `Motif Hospit` (C) | liste `REF_Motifs` |
-| `Pathologie_medicale` | texte | [S] | `Pathologie médicale` (E) | liste `REF_Pathologies` |
-| `Regime` | texte | [S] | `Régime` (F) | liste `REF_Regimes` |
-| `Provenance` | texte | [S] | `Provenance` (G) | liste `REF_Provenances` |
-| `Prescripteur` | texte | [S] | `Prescripteur` (H) | liste `REF_Prescripteurs` |
-| `Date_demande` | date | [S] | `Date de demande` (I) | |
-| `Statut` | texte | [S] | `Statut` (M) | liste `REF_Statuts` ; pilote l'exclusion facturation |
-| `Mouvements` | texte | [S] | `Mouvements` (N) | |
-| `Nb_Je_demande` | nombre | [S] | `Nb Je demandé` (Q) | |
-| `Cotation_demandee` | texte | [S] | `Cotation demandée` (R) | liste `REF_Cotations` |
-| `Date_debut_demandee` | date | [S] | `Date DEBUT demandée` (S) | |
-| `Date_fin_demandee` | date | [S] | `Date FIN demandée` (T) | |
-| `Date_postage` | date | [S] | `Date de postage` (U) | |
-| `Numero_sejour` | texte | [S] | `Numéro de séjour` (W) | |
-| `PEC` | texte | [S] | `PEC` (X) | |
-| `Nb_Je_Accorde` | nombre | [S] | `Nb Je Accordé` (Z) | plafond facturation |
-| `Cotation_accordee` | texte | [S] | `Cotation accordé` (AA) | liste `REF_Cotations` |
-| **`Date_debut_accorde`** | date | [S] | `Date début accordé` (AB) | **borne basse jointure** |
-| **`Date_fin_accorde`** | date | [S] | `Date fin accordé` (AC) | **borne haute jointure** |
-| `Date_accord` | date | [S] | `Date d'accord` (AD) | |
-| `Groupe` | texte | [S] | `Groupe initial` (AK) | liste `REF_Groupes` |
-| `Programme` | texte | [S] | `Programme` (AJ) | |
-| `Date_FIN_PEC` | date | [S] | `Date de FIN de PEC` (AH) | |
-| `Age_sejour` | nombre | [C] | **reconstruit** (remplace `Age fixe séjour`/Y) | voir formule ci-dessous, R4 |
-| `Nb_Je_consommes` | nombre | [C] | reconstruit (`Nbre de J effectués`/AE) | voir formule, alimente contrôle Nb Je |
-| `Doublon_N_DA` | booléen | [C] | — | détection R6 |
-
-**Colonnes abandonnées** : `Pathologie PMSI` (D, PMSI absent en PF), `Date Rep Pres` (J), `CHIR` (K),
-`Date opération` (L), `Motifs de refus CPS` (O) / `Motif refus OraOra` (P) `[à confirmer : à conserver si
-analyse des refus souhaitée]`, `Age fixe séjour` (Y, `#REF!` — reconstruite), `Date de FIN de PEC`
-doublonnée, `Commentaire sortie` (AG), `Date envoi notif fin hospit` (AH), `Date envoi CRH` (AI),
-`PEC intiale` (AI), `Groupe initial`/`Date début présence`/`Date fin présence`/`Nb Je présence`/
-`Cotation Présence` (AL→AQ : **dérivées de la présence, recalculées dans `CONSO_Presences`**, donc retirées
-du registre pour respecter « une source par donnée »), `Date sortie admin` / `obs` (AR, divergent ETP↔Poly).
-
-**Formules clés de `DA`** (toutes avec garde **signalante**, pas masquante) :
-
-- `Cle_Patient_Norm` [C] : `=UPPER(TRIM(SUBSTITUTE(SUBSTITUTE([@Patient],CHAR(160)," "),"  "," ")))`
-  enveloppé dans une boucle de réduction (voir §4 pour la version robuste anti-espaces multiples).
-- `Doublon_N_DA` [C] : `=SI([@N_DA]="";"";SI(NB.SI(tDA[N_DA];[@N_DA])>1;"DOUBLON";""))`
-  → alimente une mise en forme conditionnelle rouge (R6).
+**Formules clés `DA`** (gardes **signalantes**, jamais masquantes) :
+- `Cle_Patient_Norm` [C] : normalisation §5 sur `[@Patient]`.
+- `Statut_Exclu` [C] : `=SIERREUR(RECHERCHEX([@Statut];tStatuts[Statut];tStatuts[Exclu_facturation]);FAUX)`.
+- `Doublon_N_DA` [C] : `=SI([@N_DA]="";"";SI(NB.SI(tDA[N_DA];[@N_DA])>1;"DOUBLON";""))` → MFC rouge (R6).
 - `Age_sejour` [C] (reconstruit, **sans `#REF!`**) :
-  `=SI(OU([@Patient]="";[@Date_debut_accorde]="");"";`
-  `SIERREUR(DATEDIF(RECHERCHEX([@Cle_Patient_Norm];tPatients[Cle_Norm];tPatients[DateNaissance]);[@Date_debut_accorde];"y");"⚠ naiss. introuvable"))`
-  → ne masque plus : si la date de naissance est introuvable, la cellule affiche `⚠ naiss. introuvable`
-  (signalé), au lieu du `""` silencieux d'origine (R4).
-- `Nb_Je_consommes` [C] :
-  `=NB.SI.ENS(CONSO_Presences[N_DA];[@N_DA];CONSO_Presences[Est_Present];VRAI)`
-  → nombre de présences réelles rattachées à cette DA (alimente le contrôle Nb Je ≤ accordé, §6).
+  `=SI(OU([@Patient]="";[@Date_debut_accorde]="");"";SIERREUR(DATEDIF(RECHERCHEX([@Cle_Patient_Norm];tPatients[Cle_Norm];tPatients[Date_naissance]);[@Date_debut_accorde];"y");"⚠ naiss. introuvable"))`.
+- `Nb_Je_consommes` [C] : `=NB.SI.ENS(CONSO_Presences[N_DA];[@N_DA];CONSO_Presences[Est_Present];VRAI)`.
 
-### 3.3 `Saisie_Presences` — feuille de saisie des assistantes
+### 3.3 `Saisie_Presences` — saisie des assistantes (3 champs + `Parcours`)
 
-**Ergonomie inchangée** (CLAUDE.md §2) : l'assistante saisit **3 colonnes seulement**. Le reste est calculé
-et **affiché en lecture** sur la même ligne (colonnes calculées en aval, fond grisé/verrouillé).
+Saisie `[S]` : A `Patient` (liste `REF_Patients[Recherche]`, **avertir sans bloquer**), B `Date`,
+C `Programmation` (liste `REF_Programmation`), **D `Parcours`** (liste {ETP, Polyvalent} — **décision validée**,
+indispensable pour rattacher la bonne DA et réparer R1).
+Calculées `[C]` : E `Cle_Patient_Norm`, F `Est_Present`, **G `N_DA`** (formule maîtresse §5.2), H `Statut_Resolution`
+(`OK`/`HORS_LISTE`/`SANS_DA`/`MULTI_DA`), I `Cotation`, J `Regime`, K `Nb_Je_accordes`, L `PEC`, M `Groupe`,
+N `Semaine`, O `Mois`, P `Doublon_Cle` (N° DA + Date). Formules identiques v1 (RECHERCHEX sur `tDA`/`tCalendrier`),
+gardes `⚠` non masquantes.
 
-| Col | Nom cible | Statut | Liste déroulante / formule |
+### 3.4 `CONSO_Presences` — table de consolidation unique (ETP + Poly)
+
+Image directe de `Saisie_Presences` par référence structurée (zéro recopier-coller — R2). Colonnes : `Patient`,
+`Cle_Patient_Norm`, `Date`, `Programmation`, `Est_Present`, `Parcours`, `N_DA`, `Cotation`, `Regime`,
+`Nb_Je_accordes`, `Semaine`, `Mois`, `Groupe`, `PEC`, `Statut_Resolution`. **Unification ETP/Poly par `Parcours`** :
+tous les comptages aval filtrent `Parcours` — plus jamais de table Poly vide (R1). C'est l'équivalent intra-classeur
+du `TabPrésences` (combine PQ) du `.xlsm` (qui valait 19 240 lignes : 9 024 ETP + 10 217 Poly).
+
+---
+
+## 4. Couche Facturation (gros ajout v2)
+
+Quatre onglets reproduisent **intra-classeur** le moteur de facturation du `.xlsm`, en supprimant le PQ `Z:\…`.
+Toutes les jointures aval pointent désormais `tDA`, `tPatients`, `tTarif`, `CONSO_Presences` **du même classeur**.
+
+### 4.1 `REF_Tarifs` (table `tTarif`) — tarifs RÉELS (NON inventés)
+
+Source : `.xlsm!Param`/`TabTarif` (B1:E6). Valeurs relevées telles quelles (`[à vérifier JOPF]`) :
+
+| `PEC` | `Code_PEC` (=Cotation) | `Tarif_XPF` | `Prestation` |
 |---|---|---|---|
-| A | `Patient` | [S] | liste = `REF_Patients[Recherche]` (validation stricte) |
-| B | `Date` | [S] | date ; validation date valide |
-| C | `Programmation` | [S] | liste = `REF_Programmation[Programmation]` |
-| D | `Parcours` | [S] | liste = {ETP, Polyvalent} — **nécessaire** pour discriminer la jointure (R1) |
-| E | `Cle_Patient_Norm` | [C] | clé normalisée (§4) |
-| F | `Est_Present` | [C] | `=SIERREUR(RECHERCHEX([@Programmation];tProgrammation[Programmation];tProgrammation[Compte_Present]);FAUX)` |
-| G | **`N_DA`** | [C] | **résolution jointure** — voir §4 (formule maîtresse) |
-| H | `Statut_Resolution` | [C] | `OK` / `HORS_LISTE` / `SANS_DA` / `MULTI_DA` — voir §4 |
-| I | `Cotation` | [C] | `=SI([@N_DA]="";"";RECHERCHEX([@N_DA];tDA[N_DA];tDA[Cotation_accordee];"⚠"))` |
-| J | `Regime` | [C] | `=SI([@N_DA]="";"";RECHERCHEX([@N_DA];tDA[N_DA];tDA[Regime];"⚠"))` |
-| K | `Nb_Je_accordes` | [C] | `=SI([@N_DA]="";"";RECHERCHEX([@N_DA];tDA[N_DA];tDA[Nb_Je_Accorde];"⚠"))` |
-| L | `PEC` | [C] | `=SI([@N_DA]="";"";RECHERCHEX([@N_DA];tDA[N_DA];tDA[PEC];""))` |
-| M | `Groupe` | [C] | `=SI([@N_DA]="";"";RECHERCHEX([@N_DA];tDA[N_DA];tDA[Groupe];""))` |
-| N | `Semaine` | [C] | `=SIERREUR(RECHERCHEX([@Date];tCalendrier[Date];tCalendrier[No_Semaine]);"⚠ date hors calendrier")` |
-| O | `Mois` | [C] | `=SI([@Date]="";"";TEXTE([@Date];"mm/aa"))` |
-| P | `Doublon_Cle` | [C] | détection (N° DA + Date) en double (R10) — voir §5 |
+| Neuro | HJSN | 32000 | HJSN - Forfait Affection Neurologique |
+| Amputé | HJSA | 32000 | Forfait Affection Neuro Vasculaire Amputation `[à confirmer libellé exact]` |
+| Respi | HJSR | 31000 | Forfait Affection Respiratoire |
+| Métabo | HJSM | 30000 | Forfait Affection Métabolique |
+| Ortho | HJST | 27000 | Forfait Affection Orthopédique |
 
-> La colonne `Parcours` (D) est ajoutée à la saisie par rapport au « Patient+Date+Programmation » du
-> CLAUDE.md : elle est **indispensable** pour rattacher la bonne DA quand un patient a fréquenté les deux
-> parcours, et pour réparer R1 (Poly distinct d'ETP). C'est une liste déroulante à 2 valeurs, geste minimal.
-> `[arbitrage métier requis]` : valider l'ajout de cette 4e colonne de saisie (ou la pré-remplir par défaut
-> selon l'assistante/le classeur d'origine).
+> Colonnes `tTarif` : `PEC`, `Code_PEC`, `Tarif_XPF`, `Prestation`. Le `.xlsm` nomme la colonne tarif `Tarifs` et
+> la colonne code `Code PEC` ; on conserve ces **noms d'origine en interne** pour que les formules de facture
+> reportées restent valides, ou on adapte les formules au renommage `[arbitrage]`. Seed : `data/referentiels/tarifs.csv`.
 
-### 3.4 `CONSO_Presences` — table de consolidation unique (ETP + Polyvalent)
+### 4.2 `Suivi_Factures` (= `Recap Facturat° futur` / `TabSuiviApi`)
 
-**Une seule table** alimentée par `Saisie_Presences` (réparation R1 : Poly n'est plus une table séparée
-vide, c'est une valeur de la colonne `Parcours`). En v1 formules : `CONSO_Presences` est une **image directe**
-de `Saisie_Presences` (mêmes colonnes calculées, recopiées par référence structurée ou par
-`=Saisie_Presences[...]`), ce qui évite tout recopier-coller (R2). En évolution Power Query, c'est la sortie
-du merge (`powerquery/CONSO_Presences.pq`).
+Registre de suivi des factures. Source réelle : `.xlsm!Recap Facturat° futur`, table **`TabSuiviApi`** (A11:AL9337,
+≈9 335 lignes, 124 258 formules). **Colonnes réelles relevées** (table `tSuiviFactures` cible) :
 
-Colonnes : `Patient`, `Cle_Patient_Norm`, `Date`, `Programmation`, `Est_Present`, `Parcours`, `N_DA`,
-`Cotation`, `Regime`, `Nb_Je_accordes`, `Semaine`, `Mois`, `Groupe`, `PEC`, `Statut_Resolution`.
+| Col | Nom réel | Statut | Formule/source cible (intra-classeur) |
+|---|---|---|---|
+| A | `Mois` | [C] | `=SI(ESTVIDE([@Date_debut]);"";MOIS([@Date_debut]))` (réel : `MONTH(TabSuiviApi[Date début])`) |
+| B | `Date_facture` | [S] | date de facture |
+| C | `N_semaine` | [S] | liste `REF_Calendrier[No_Semaine]` |
+| D | `Ref` | [S/C] | référence interne |
+| E | `N_DE_FACTURE` | [S] | numéro de facture (ex. `F0462026`) |
+| F | `Code_recherche` | [S] | liste `REF_Patients[Recherche]` → clé patient |
+| G | `Type_de_facture` | [S] | type (CPS / SS / Autres — voir §4.5) |
+| H | `Cotation` | [S] | liste `REF_Cotations[Cotation]` |
+| I | `Type_PEC` | [C] | dérivé PEC |
+| J | `DA` (=N° DA) | [S/C] | N° DA (clé de jointure facturation) |
+| K | `A_verifier` | [S] | drapeau |
+| L | `N_DA_codes_acc` | [S] | N° DA + codes d'accord |
+| M | `Regime` | [C] | `=RECHERCHEX([@DA];tDA[N_DA];tDA[Regime];"")` (réel : `XLOOKUP(...,TabDA[N° DA],TabDA[Régime],"")`) |
+| N | `DN` | [C] | `=RECHERCHEX([@Code_recherche];tPatients[Recherche];tPatients[DN];"")` |
+| O | `Nom` | [C] | `=RECHERCHEX([@Code_recherche];tPatients[Recherche];tPatients[Nom];"")` |
+| P | `Prenom` | [C] | `=RECHERCHEX([@Code_recherche];tPatients[Recherche];tPatients[Prenom];"")` |
+| Q | `Date_naissance` | [C] | `=RECHERCHEX([@Code_recherche];tPatients[Recherche];tPatients[Date_naissance];"")` |
+| R | `Adresse` | [C] | `=RECHERCHEX([@Code_recherche];tPatients[Recherche];tPatients[Adresse];"")` (garde `=0→""`) |
+| S | `Commune` | [C] | `=RECHERCHEX([@Code_recherche];tPatients[Recherche];tPatients[Commune];"")` (garde `=0→""`) |
+| T | `Telephone` | [C] | `=RECHERCHEX([@Code_recherche];tPatients[Recherche];tPatients[N_tel];"")` |
+| U | `Type_de_PEC` | [C] | dérivé |
+| V | `Date_debut` | [S] | date début (intervalle d'accord) |
+| W | `Date_fin` | [S] | date fin |
+| X | `Montant` | [C] | **formule montant — voir §4.6** (réel : `SUBTOTAL(9,…)` en ligne de total) |
+| Y/AC | `Categorie_Refus` | [S] | liste `REF_CategoriesRefus` (`Droits fermés`, `JRS hors DA`, …) |
+| Z | `Forcer_cellule` | [S] | override manuel |
+| AA | `Ratio` | [C] | `=+X/Z` (réel : `=+X10/Z10`) `[à confirmer sémantique]` |
+| AB | `Date_depot` | [S] | date de dépôt CPS |
+| AD | `Commentaires` | [S] | libre |
+| AE | `FAE` | [S] | drapeau |
+| AF | `Date_paiement` | [S] | |
+| AG | `Controle_paiement` | [C] | contrôle |
+| AH | `Paye_NonPaye` | [C] | statut paiement |
+| AI | `Total_Paye` | [C] | cumul |
+| AJ | `Date_paiement_estime` | [C] | |
+| AK | `N_fact_prov` | [S] | n° facture provisoire |
+| AL | `Commentaire` | [S] | libre |
 
-> **Unification** : ETP et Poly cohabitent par la colonne `Parcours`. Tous les comptages (`Cockpit`,
-> `Facturation`) filtrent sur `Parcours` — plus jamais de table Poly vide (R1) ni de COUNTIFS pointant une
-> table fantôme.
+> Colonnes de jointure réelles confirmées par les motifs de formules du `.xlsm` :
+> `XLOOKUP(TabSuiviApi[DA]; TabDA[N° DA]; TabDA[Nb Je Accordé])`,
+> `XLOOKUP(TabSuiviApi[Code recherche]; TabPatients[Recherche]; TabPatients[…])`,
+> `XLOOKUP(TabSuiviApi[Cotation]; TabTarif[Code PEC]; TabTarif[PEC])`,
+> `COUNTIFS(TabPrésences[semaine]; TabSuiviApi[N° semaine]; TabPrésences[N° DA]; TabSuiviApi[DA])` →
+> **nombre de présences de la DA sur la semaine** (base du montant). Toutes reportées sur `tDA`/`tPatients`/
+> `tTarif`/`CONSO_Presences` **du même classeur**, avec gardes signalantes au lieu des `""` silencieux d'origine.
 
-### 3.5 `Facturation` — dossiers prêts à facturer
+### 4.3 `Bordereaux` (= `.xlsm!Bordereaux (2)`)
 
-Table dérivée (formules / `[PQ ultérieur]`) qui **ne liste que les lignes facturables** (règles §6). Colonnes :
+Totaux par N° de facture / N° DA. Formule réelle relevée :
+`=SUMIFS(TabSuiviApi[Montant]; TabSuiviApi[N° DE FACTURE]; <N° facture>)` (et un repli
+`SUM(INDIRECT("…:G"&19+n))`). Cible (table `tBordereaux`), en-têtes (réels) : `No_Bordereau`, `N_FACTURE`, `DN`,
+`Periode` (« Période du JJ/MM/AAAA au JJ/MM/AAAA »), `Nb_JRS` (« nn JRS »), `Montant`. Formule cible :
+`=SOMME.SI.ENS(tSuiviFactures[Montant];tSuiviFactures[N_DE_FACTURE];[@N_FACTURE])`. La liste « N° facture »
+s'appuie sur `tSuiviFactures[N_DE_FACTURE]` (le `.xlsm` validait via `INDIRECT("TabSuiviApi[Bordereau]")` — on
+remplace l'INDIRECT volatile par une référence structurée directe).
 
-| Col | Nom | Formule / source |
-|---|---|---|
-| `N_DA` | `CONSO_Presences[N_DA]` (filtré) | |
-| `Patient` | `RECHERCHEX(N_DA→tDA[Patient])` | |
-| `Parcours` | `CONSO_Presences[Parcours]` | |
-| `Cotation` | `tDA[Cotation_accordee]` | |
-| `Regime` | `tDA[Regime]` | |
-| `Date` | `CONSO_Presences[Date]` | |
-| `Tarif_XPF` | `RECHERCHEX(Cotation→tCotations[Tarif_XPF])` | `[à confirmer JOPF]` ; vide tant que tarifs non saisis |
-| `Nb_Je_consommes` | `tDA[Nb_Je_consommes]` | |
-| `Nb_Je_accordes` | `tDA[Nb_Je_Accorde]` | |
-| `Eligible` | formule combinant les 6 conditions §6 (booléen) | |
-| `Motif_rejet` | texte expliquant pourquoi non éligible (jamais silencieux) | |
+### 4.4 `Facture` (= `.xlsm!Facturation`) — modèle imprimable
 
-La table **affiche tout** mais marque `Eligible` ; un filtre/vue ne montre que `Eligible=VRAI`. Tant que le
-**format CPS n'est pas tranché** (CLAUDE.md §7), `Facturation` produit un **bordereau interne validé**, pas
-le fichier CPS final (§9).
+Une facture imprimable, sélectionnée par `N° DE FACTURE` (validation = `tSuiviFactures[N_DE_FACTURE]`). Champs
+réels relevés : `FACTURE N°`, `ORGANISME PAYEUR`, `Téléphone`, `Nom`, `Prénom`, `Né(e) le`, `Adresse`, `Commune`,
+`Date de facture`, `Cotation`, `Nb jours accordés`, `DA`, `Nb de journées`, `Prestation`, `TOTAL`. Formules réelles :
+- `=RECHERCHEX(<cotation>;tTarif[Code_PEC];tTarif[Prestation];"")` (libellé prestation),
+- `=RECHERCHEX(<cotation>;tTarif[Code_PEC];tTarif[Tarif_XPF];"")` (tarif unitaire),
+- `=SI(@="";"";@*@)` (montant = tarif × nb journées),
+- `=RECHERCHEX(<N° facture>;tSuiviFactures[N_DE_FACTURE];tSuiviFactures[DN];"")` (en-tête patient),
+- **montant en lettres** : `=MAJUSCULE(ConvNumberLetter(@))&" FRANCS CFP"` →
+  **fonction VBA `ConvNumberLetter` conservée en option** (CLAUDE.md tolère le VBA anodin ; sinon, formule pure
+  `[arbitrage]`). C'est le **seul code VBA réel** du `.xlsm` (Module1), autonome et reproductible à l'identique.
 
-### 3.6 `Cockpit` — pilotage (TCD)
+> Le `.xlsm` utilisait un **TCD** alimentant la facture (« ALT+F5 pour actualiser le TCD »). En cible, la facture
+> lit directement `tSuiviFactures` par `RECHERCHEX` → **pas de TCD à rafraîchir manuellement**.
 
-TCD construits sur `CONSO_Presences` (réel) et sur `DA` (prévisionnel via `Nb_Je_Accorde`). Axes : `Parcours`,
-`Mois`/`Semaine`, `Cotation`, `Regime`. Compteur de présences = somme de `Est_Present`. **Réel ETP et réel
-Poly tous deux corrects** (R1 résolu, source unique). Le prévisionnel s'appuie sur `DA` (une seule source —
-fin du mélange Poly/ETP de R5-diagnostic « Chiffres prévisionnels »).
+### 4.5 Mapping payeur **CPS / SS / Autres**
 
-### 3.7 `CTRL_Qualite` — zone de contrôle qualité
+Le nom du fichier d'origine (« Factures_CPS.SS.Autres ») et la colonne `Type de facture`/`TYPE DE FACTURE` du
+suivi confirment **trois canaux payeurs**. On les rattache au **régime** via `REF_Regimes[Payeur]` :
 
-Une feuille de compteurs d'anomalies (formules `NB.SI`), pour rendre les ruptures **visibles** :
-lignes `HORS_LISTE`, `SANS_DA`, `MULTI_DA`, doublons `N_DA`, doublons `N_DA+Date`, présences sans calendrier,
-`Nb_Je_consommes > Nb_Je_Accorde`. Chaque compteur > 0 = à traiter. Voir §5.
-
----
-
-## 4. Mécanisme de jointure détaillé (pièce maîtresse)
-
-### 4.1 Normalisation de la clé patient (règle d'or, CLAUDE.md §4)
-
-Toute clé patient est normalisée **avant** toute jointure : `TRIM` + réduction des espaces multiples internes
-à un seul + suppression de l'espace insécable `CHAR(160)` + casse homogène (`UPPER`). Formule cible
-(colonne d'aide `Cle_Patient_Norm`, présente dans `REF_Patients`, `DA`, `Saisie_Presences`) :
-
-```
-=MAJUSCULE(
-   SUPPRESPACE(
-     SUBSTITUE(SUBSTITUE(SUBSTITUE([@Patient];CHAR(160);" ");"  ";" ");"  ";" ")
-   )
- )
-```
-
-`SUPPRESPACE` (`TRIM`) réduit déjà les espaces multiples internes ET de bord en Excel ; les `SUBSTITUE`
-neutralisent l'espace insécable et tout résidu. Cette normalisation **neutralise les 66 / 1 123 / 1 229 / 2 694
-valeurs à espaces multiples** constatées (R7) et homogénéise la casse. La jointure s'opère **toujours** sur
-`Cle_Patient_Norm`, jamais sur `Patient` brut.
-
-### 4.2 Résolution du `N° DA` (Saisie_Presences col G) — formule maîtresse
-
-Règle métier conservée (CLAUDE.md §4) : une présence se rattache à une DA si **Patient normalisé identique**
-ET **Date ∈ [`Date_debut_accorde` ; `Date_fin_accorde`]** ET **`Parcours` identique** ET **Statut DA non
-exclu** (`Exclu_facturation`=FAUX, c.-à-d. ∉ {DEP refusée, DEP annulée, Refus CPS, Refus centre}).
-
-Réalisée par `FILTER` (dynamique 365) sur les colonnes d'aide normalisées :
-
-```
-G (liste des DA candidates, formule de travail, peut vivre en colonne cachée) :
-=SI([@Patient]="";"";
-  FILTRE(tDA[N_DA];
-    (tDA[Cle_Patient_Norm]=[@Cle_Patient_Norm])
-   *(tDA[Parcours]=[@Parcours])
-   *(tDA[Date_debut_accorde]<=[@Date])
-   *(tDA[Date_fin_accorde]>=[@Date])
-   *(tDA[Statut_Exclu]=FAUX);
-   ""))
-```
-
-où `tDA[Statut_Exclu]` est une colonne calculée de `DA` :
-`=SIERREUR(RECHERCHEX([@Statut];tStatuts[Statut];tStatuts[Exclu_facturation]);FAUX)`.
-
-### 4.3 Gestion 0 / 1 / N match (jamais de vide silencieux — DoD)
-
-Le `N_DA` final et le `Statut_Resolution` (col H) gèrent explicitement les 3 cas. En posant
-`m = NBVAL(FILTRE(...))` (nombre de DA candidates) :
-
-```
-N_DA (col G finale) :
-=SI([@Cle_Patient_Norm]="";"";
-  SI(NB.SI(tPatients[Cle_Norm];[@Cle_Patient_Norm])=0; "⚠ HORS LISTE";
-    LET(res; FILTRE(tDA[N_DA]; (… mêmes critères qu'en 4.2 …); "");
-        SI(NBVAL(res)=0; "⚠ SANS DA";
-           SI(NBVAL(res)>1; "⚠ MULTI DA";
-              INDEX(res;1))))))
-```
-
-```
-Statut_Resolution (col H) :
-=SI([@N_DA]="";"";
-   SI(GAUCHE([@N_DA];1)="⚠"; STXT([@N_DA];3;20); "OK"))
-```
-
-- **Patient hors référentiel** → `⚠ HORS LISTE` (réparation directe de la DoD §9 : nom mal orthographié /
-  hors-liste = ligne signalée, jamais vide).
-- **0 match DA** → `⚠ SANS DA` (R8 : présence non rattachée rendue **visible** au lieu d'être figée vide).
-- **>1 match DA** → `⚠ MULTI DA` (R6/R10 : chevauchement d'accords ou doublon de DA → alerte, on ne prend
-  pas silencieusement la 1re comme l'`XLOOKUP` d'origine).
-- **1 match** → le `N° DA` est posé, toutes les colonnes I→M se remplissent par `RECHERCHEX`.
-
-Chaque valeur commençant par `⚠` déclenche la **mise en forme conditionnelle rouge** de la ligne (§5).
-**Aucun `IFERROR`/`SIERREUR` masquant** sur la chaîne de facturation : les gardes affichent un libellé,
-elles ne renvoient jamais `""` silencieux (correction directe de la cause racine R4 du diagnostic).
-
-> Note de robustesse : `Date_debut_accorde`/`Date_fin_accorde` sont des **dates réelles** (vérifié sur
-> source : `datetime`), donc la comparaison d'intervalle est numérique et fiable ; les DA d'un même patient
-> sont **séquentielles non chevauchantes** (vérifié : ALEXANDRE Nilton — 3 DA bord à bord), ce qui garantit
-> qu'un `⚠ MULTI DA` signale une **vraie** anomalie (chevauchement saisi) et non un cas normal.
-
----
-
-## 5. Contrôles d'intégrité & validations
-
-### 5.1 Listes déroulantes (validation de données)
-
-Toutes les listes pointent une **table `REF_*` unique** (fin des cibles INDIRECT multiples / nommage
-incohérent — R-nommage du diagnostic) :
-
-| Cellule | Source liste |
+| Régime (source) | Payeur cible `[à confirmer mapping]` |
 |---|---|
-| `Saisie_Presences[Patient]` | `REF_Patients[Recherche]` (validation **stricte** : refus de saisie hors-liste, ou avertissement non bloquant `[arbitrage métier requis]`) |
-| `Saisie_Presences[Programmation]` | `REF_Programmation[Programmation]` |
-| `Saisie_Presences[Parcours]` | liste statique {ETP, Polyvalent} |
-| `DA[Statut]`,`DA[Regime]`,`DA[Cotation_*]`,`DA[Groupe]`,`DA[Provenance]`,`DA[Prescripteur]`,`DA[Pathologie_medicale]`,`DA[Motif_Hospit]` | tables `REF_*` correspondantes |
+| RGS, RNS, RST | **CPS** |
+| SS | **SS** |
+| Auto-financement / autre | **Autres** |
 
-### 5.2 Mises en forme conditionnelles d'alerte (ligne rouge)
+`Suivi_Factures[Type_de_facture]` (G) peut être **dérivé** : `=RECHERCHEX([@Regime];tRegimes[Regime];tRegimes[Payeur];"⚠")`
+(remplace la saisie libre actuelle, source d'incohérence). `[à confirmer mapping exact RGS/RNS/RST→CPS]`.
 
-| Déclencheur | Règle | Rupture corrigée |
-|---|---|---|
-| Clé patient non résolue | `Statut_Resolution="HORS LISTE"` | DoD §9 / R7 |
-| Présence sans accord | `Statut_Resolution="SANS DA"` | R8 |
-| Accords multiples | `Statut_Resolution="MULTI DA"` | R6 |
-| `N° DA` en doublon dans `DA` | `DA[Doublon_N_DA]="DOUBLON"` | R6 |
-| Doublon (N° DA + Date) en présence | `NB.SI.ENS(CONSO[N_DA];[@N_DA];CONSO[Date];[@Date])>1` | R10 |
-| Date hors calendrier | `Semaine` commence par `⚠` | qualité |
-| Nb Je dépassé | `Nb_Je_consommes > Nb_Je_accordes` (sur `Facturation`/`DA`) | DoD §9 |
+### 4.6 Formules clés de facturation (montant / tarif / bordereau)
 
-### 5.3 Feuille `CTRL_Qualite`
-
-Compteurs `NB.SI`/`NB.SI.ENS` de chacun des déclencheurs ci-dessus + total de lignes `Saisie` /
-lignes `Eligible`. Objectif : tout compteur > 0 visible d'un coup d'œil ; sert de tableau de bord qualité
-avant transmission CPS.
+- **Nb journées facturables** (par DA et semaine, repris du `.xlsm`) :
+  `=NB.SI.ENS(CONSO_Presences[Semaine];[@N_semaine];CONSO_Presences[N_DA];[@DA];CONSO_Presences[Est_Present];VRAI)`.
+- **Tarif unitaire** : `=RECHERCHEX([@Cotation];tTarif[Code_PEC];tTarif[Tarif_XPF];"⚠ tarif inconnu")`.
+- **Montant ligne** : `Montant = Tarif_unitaire × Nb_journées_facturables`
+  → `=SI([@Cotation]="";"";Tarif_unitaire*Nb_journées)`, plafonné par `Nb_Je_Accorde` (cf. règle §7-6).
+- **Bordereau** : `=SOMME.SI.ENS(tSuiviFactures[Montant];tSuiviFactures[N_DE_FACTURE];[@N_FACTURE])`.
 
 ---
 
-## 6. Règles de facturation (DoD §9)
+## 5. Mécanisme de jointure détaillé (pièce maîtresse)
 
-Un dossier (ligne) apparaît comme **`Eligible=VRAI`** dans `Facturation` **si et seulement si TOUTES** ces
-conditions sont vraies :
+### 5.1 Normalisation de la clé patient (règle d'or, CLAUDE.md §4)
 
-1. `Est_Present = VRAI` (Programmation comptée présente via `REF_Programmation`).
-2. `Regime` facturable **CPS** (`REF_Regimes[Facturable_CPS]=VRAI` ; `[à confirmer]` mapping exact, a priori
-   RGS/RNS/RST = CPS, SS/Auto-financement exclus).
-3. `Cotation` **valide** (∈ `REF_Cotations` = {HJSR, HJST, HJSN, HJSA, HJSM}).
-4. `N_DA` **résolu** (`Statut_Resolution="OK"`, donc ni HORS LISTE, ni SANS DA, ni MULTI DA).
-5. `Date` **dans la fenêtre d'accord** (`Date_debut_accorde ≤ Date ≤ Date_fin_accorde`) — déjà garanti par
-   la jointure §4, re-vérifié en colonne de contrôle.
-6. `Nb_Je_consommes ≤ Nb_Je_Accorde` pour la DA (sinon la ligne au-delà du plafond est signalée, non éligible).
+Toute clé patient normalisée **avant** toute jointure : `MAJUSCULE` + `SUPPRESPACE` (`TRIM`, réduit espaces
+multiples internes et de bord) + suppression de l'espace insécable `CAR(160)`. Colonne d'aide `Cle_Norm` /
+`Cle_Patient_Norm` présente dans `REF_Patients`, `DA`, `Saisie_Presences` (et exploitée par `Suivi_Factures` via
+`Code_recherche` → `tPatients[Cle_Norm]`) :
 
-`Motif_rejet` documente la 1re condition non satisfaite (jamais de rejet silencieux).
+```
+=MAJUSCULE(SUPPRESPACE(SUBSTITUE(SUBSTITUE(SUBSTITUE([@Patient];CAR(160);" ");"  ";" ");"  ";" ")))
+```
 
-**Tableau `REF_Cotations`** (valeurs vérifiées ; **aucun tarif inventé**) :
+Neutralise les 66 / 1 123 / 1 229 / 2 694 valeurs à espaces multiples (R7) et homogénéise la casse. La jointure
+s'opère **toujours** sur la clé normalisée, jamais sur le nom brut.
 
-| Cotation | Libellé | Tarif (XPF/jour) |
-|---|---|---|
-| HJSR | `[à confirmer]` | `[à confirmer JOPF]` |
-| HJST | `[à confirmer]` | `[à confirmer JOPF]` |
-| HJSN | `[à confirmer]` | `[à confirmer JOPF]` |
-| HJSA | `[à confirmer]` | `[à confirmer JOPF]` |
-| HJSM | `[à confirmer]` | `[à confirmer JOPF]` |
+### 5.2 Résolution du `N° DA` (Saisie_Presences col G) — formule maîtresse
 
-**Statut du format CPS** : non tranché (CLAUDE.md §7 — pas de Carte Vitale, pas de PMSI, tarifs par arrêté
-JOPF). Tant que le canal/format GDR-DSI CPS n'est pas confirmé, `Facturation` = **bordereau interne validé**
-(liste des dossiers prêts), pas le format de transmission CPS final. Action hors-code : entretien GDR/DSI CPS.
+Règle métier (CLAUDE.md §4) : présence rattachée à une DA si **Patient normalisé identique** ET
+**Date ∈ [`Date_debut_accorde` ; `Date_fin_accorde`]** ET **`Parcours` identique** ET **Statut non exclu**
+(`Statut_Exclu`=FAUX). Réalisée par `FILTRE` + `LET` sur clés normalisées, avec gestion explicite 0/1/N :
+
+```
+=SI([@Cle_Patient_Norm]="";"";
+  SI(NB.SI(tPatients[Cle_Norm];[@Cle_Patient_Norm])=0;"⚠ HORS LISTE";
+    LET(res; FILTRE(tDA[N_DA];
+                (tDA[Cle_Patient_Norm]=[@Cle_Patient_Norm])
+               *(tDA[Parcours]=[@Parcours])
+               *(tDA[Date_debut_accorde]<=[@Date])
+               *(tDA[Date_fin_accorde]>=[@Date])
+               *(tDA[Statut_Exclu]=FAUX); "");
+       SI(NBVAL(res)=0;"⚠ SANS DA";
+          SI(NBVAL(res)>1;"⚠ MULTI DA";INDEX(res;1))))))
+```
+
+- **hors référentiel** → `⚠ HORS LISTE` (DoD §9 : nom mal orthographié = signalé, jamais vide) ;
+- **0 match** → `⚠ SANS DA` (R8) ; **>1 match** → `⚠ MULTI DA` (R6/R10) ; **1 match** → `N° DA` posé.
+- Toute valeur `⚠` déclenche la **MFC rouge** de ligne. **Aucun `SIERREUR` masquant** sur la chaîne de
+  facturation — correction directe de la cause racine R4.
 
 ---
 
-## 7. Tableau de traçabilité Rupture → Correction
+## 6. Comment le fichier unique tue R11 (désalignement) — par construction
+
+**R11 (cause n°1 du désalignement)** = le déversement automatique repose sur un **Power Query inter-fichiers**
+ultra-sensible : (1) retypage par **nom de colonne littéral** avec pièges typographiques
+(`"Date  de FIN de PEC"` deux espaces, `"Date envoi CRH "` espace final, `"No Facture "` espace final) ;
+(2) structures ETP↔Poly divergentes (dernière colonne `Date sortie admin` vs `obs`) ; (3) dépendance au **chemin
+réseau `Z:\…`** ; (4) exigence de **tables nommées exactes** (`TabDA`, `TabPresences`) dans les fichiers GP ;
+(5) clé `N° DA` sans normalisation (2 doublons ETP) ; (6) **28 erreurs littérales** + 5 plages nommées cassées
+dans le `.xlsm`.
+
+**Le classeur unique supprime la chaîne entière** :
+- **Plus de fichiers externes ni de `Z:\…`** : la saisie (`DA`, `Saisie_Presences`) et la facturation
+  (`Suivi_Factures`, `Bordereaux`, `Facture`) **cohabitent**. Les jointures deviennent des **références
+  structurées intra-classeur** (`tDA`, `tPatients`, `tTarif`, `CONSO_Presences`) → §3.1, §3.4, §4.2–4.4.
+  Disparition de R11.1 (chemin), R11.3 (table nommée externe), R11.4 (Excel.Workbook/File.Contents).
+- **Plus de retypage par nom littéral fragile** : les en-têtes sont **figés par le build openpyxl** (noms
+  cibles propres, sans espaces parasites) ; aucune assistante ne renomme un en-tête source distant. R11.1
+  (typographie) neutralisé.
+- **Plus de `Table.Combine` ETP/Poly** : l'unification se fait par la **colonne `Parcours`** d'une table unique
+  `CONSO_Presences` (R1/R11.2). La divergence `Date sortie admin` vs `obs` (colonne AR) n'existe plus (colonne
+  abandonnée, §2).
+- **Clé `N° DA` fiabilisée** : `Doublon_N_DA` + MFC ; jointures renvoient `⚠ MULTI DA` au lieu de choisir
+  silencieusement la 1re ligne (R5/R6 du `02b`).
+- **Zéro erreur littérale** : les 28 `#REF!`/`#N/A` et 5 plages nommées cassées du `.xlsm` ne sont **pas
+  reportées** ; gardes signalantes partout (DoD §9).
+
+> En clair : **le bug de désalignement n'est pas corrigé requête par requête, il est supprimé** — il n'existe
+> plus de « inter-fichiers » à désaligner. C'est l'argument central de la cible « un seul fichier ».
+
+---
+
+## 7. Contrôles, validations & règles de facturation
+
+### 7.1 Listes déroulantes (chaque liste → une table `REF_*` unique, fin des INDIRECT multiples)
+
+`Saisie_Presences[Patient]`→`tPatients[Recherche]` (**avertir sans bloquer**) ; `[Programmation]`→`tProgrammation` ;
+`[Parcours]`→{ETP, Polyvalent}. `DA[*]`→`REF_*`. **Facturation** : `Suivi_Factures[Cotation]`→`tCotations`,
+`[N_semaine]`→`tCalendrier`, `[Code_recherche]`→`tPatients`, `[Categorie_Refus]`→`tCategoriesRefus` ;
+`Facture[N° facture]`→`tSuiviFactures[N_DE_FACTURE]` ; `Bordereaux[N_FACTURE]`→`tSuiviFactures[N_DE_FACTURE]`.
+(Le `.xlsm` utilisait des `INDIRECT("TabPrésences[…]")`/`INDIRECT("TabSuiviApi[Bordereau]")` volatils → remplacés
+par références structurées directes.)
+
+### 7.2 Mises en forme conditionnelles d'alerte (ligne rouge)
+
+`HORS LISTE` (R7/DoD) · `SANS DA` (R8) · `MULTI DA` (R6) · `Doublon_N_DA="DOUBLON"` (R6) · doublon (N° DA+Date)
+(R10) · date hors calendrier · `Nb_Je_consommes > Nb_Je_accordes` (DoD) · **`Categorie_Refus` renseignée** (facture
+en anomalie : `Droits fermés`, `JRS hors DA`…) · **`Tarif_unitaire="⚠ tarif inconnu"`** (cotation hors `tTarif`).
+
+### 7.3 `CTRL_Qualite`
+
+Compteurs `NB.SI`/`NB.SI.ENS` de chaque déclencheur ci-dessus + total lignes `Saisie`, lignes `Eligible`,
+**total factures par catégorie de refus**, **montant total bordereau vs somme suivi** (contrôle de cohérence).
+
+### 7.4 Règles de facturation (DoD §9, enrichies)
+
+Une ligne est **`Eligible=VRAI`** ssi **toutes** ces conditions sont vraies :
+1. `Est_Present = VRAI` (via `REF_Programmation[Compte_Present]`).
+2. `Regime` facturable **CPS** (`REF_Regimes[Facturable_CPS]=VRAI` ; mapping payeur §4.5 ; `[à confirmer]`).
+3. `Cotation` valide ∈ {HJSR, HJST, HJSN, HJSA, HJSM} (présente dans `tTarif`).
+4. `N_DA` résolu (`Statut_Resolution="OK"`).
+5. `Date ∈ [Date_debut_accorde ; Date_fin_accorde]` (garanti par la jointure §5, re-vérifié).
+6. **`Nb_Je_consommes ≤ Nb_Je_Accorde`** (lignes au-delà du plafond signalées, non éligibles).
+7. **`Categorie_Refus` vide** (pas de `Droits fermés` / `JRS hors DA` actif).
+
+`Montant = Tarif(Cotation) × Nb_Je_facturables` (§4.6). `Motif_rejet` documente la 1re condition non satisfaite
+(jamais de rejet silencieux).
+
+**Statut format CPS** : non tranché (CLAUDE.md §7 — pas de Carte Vitale, pas de PMSI, tarifs par arrêté JOPF).
+Tant que le canal GDR-DSI CPS n'est pas confirmé, la sortie est un **bordereau interne validé** + un **modèle de
+facture imprimable déjà existant** (`Facture`, repris du `.xlsm`) — l'établissement dispose donc déjà du document
+de facturation, seul le **canal de transmission** reste à confirmer. Action hors-code : entretien GDR/DSI CPS.
+
+---
+
+## 8. Traçabilité Rupture → Correction (mise à jour v2 : R11 + requalification R2)
 
 | Rupture | Gravité | Cause d'origine | Correction par conception |
 |---|---|---|---|
-| **R1** Volet Poly perdu | 🔴 | `TabPresencePoly` jamais alimentée (collage manuel oublié) | **Table unique `CONSO_Presences`** discriminée par colonne `Parcours` ; plus de table séparée à remplir. Comptages filtrent `Parcours`. |
-| **R2** Transfert manuel amont→SRR | 🔴 | Tables SRR sans formule, recopier-coller | **Tout intra-classeur** : `CONSO_Presences` est une dérivation par formule de `Saisie_Presences` ; zéro copier-coller, recalcul natif (ou PQ « Actualiser tout » en évolution). |
-| **R3** Double source ETP | 🟠 | 2 copies du même classeur | **Une seule source `DA`** ; `GP_ETP_1` abandonné (données identiques). `[arbitrage : maître = GP_ETP_1]`. |
-| **R4** `#REF!` masqué (Age) | 🟠 | `XLOOKUP(#REF!)` + `IFERROR` | Colonne `Age fixe séjour` **abandonnée**, **reconstruite** `Age_sejour` sur `REF_Patients` ; garde **signalante** `⚠ naiss. introuvable`, plus de masquage. |
-| **R5** `#VALUE!` SUIVI PI | 🟡 | feuille de suivi non protégée | Feuille `SUIVI PI` **abandonnée** ; suivi reconstruit dans `Cockpit`/`CTRL_Qualite` sans erreur. |
-| **R6** Doublons `N° DA` | 🟠 | XLOOKUP prend la 1re occurrence | Colonne `Doublon_N_DA` + MFC rouge ; jointure renvoie `⚠ MULTI DA` au lieu de choisir silencieusement. |
-| **R7** Patients clés instables | 🟠 | match nom brut, espaces/casse | **Normalisation systématique** `Cle_Patient_Norm` (TRIM + espaces + `CHAR(160)` + UPPER) avant toute jointure (règle d'or §4). |
-| **R8** Présences sans N° DA | 🟠 | jointure échouée figée vide | `Statut_Resolution="SANS DA"` + ligne rouge ; **rendu visible**, jamais vide silencieux. |
-| **R9** Orphelins / DA non consommés | 🟡 | clés tronquées, DA Poly non consommées (effet R1) | Validation stricte `REF_Patients` + `CTRL_Qualite` (DA jamais consommées) ; R1 résolu supprime les 675 Poly. |
-| **R10** Doublons (N° DA + Date) | 🟡 | collages répétés / double saisie | Colonne `Doublon_Cle` + MFC rouge + compteur `CTRL_Qualite` ; un seul flux de saisie (plus de collage). |
+| **R1** Volet Poly perdu | 🔴 | `TabPresencePoly` jamais alimentée (ancienne conso SRR) | Table unique `CONSO_Presences` par `Parcours` ; Poly n'est plus une table à part. |
+| **R2** *requalifiée* — transfert amont→facturation | 🔴 | **Power Query AUTOMATIQUE inter-fichiers** (pas manuel) dépendant de noms/chemins exacts | Tout **intra-classeur** : `CONSO_Presences` = dérivation par formule ; PQ `Z:\…` supprimé. |
+| **R3** Double source ETP | 🟠 | 2 copies du même classeur | Une seule source `DA` ; **maître = `GP_ETP_1`** (validé). |
+| **R4** `#REF!` masqué (Age + col Q patients) | 🟠 | `XLOOKUP(#REF!)`+IFERROR ; 443 `#REF!` col Q de `GP_PATIENTS` | `Age_sejour` reconstruit signalant ; **col Q non importée** ; `Recherche` recalculée. |
+| **R5** Erreurs littérales | 🟡 | 2 `#VALUE!` (SUIVI PI) ; **28 erreurs + 5 plages nommées cassées du `.xlsm`** | Feuilles de cache abandonnées ; plages nommées non reportées ; gardes signalantes. |
+| **R6** Doublons `N° DA` | 🟠 | XLOOKUP 1re occurrence | `Doublon_N_DA` + MFC ; jointure → `⚠ MULTI DA`. |
+| **R7** Patients clés instables | 🟠 | match nom brut espaces/casse | Normalisation `Cle_Norm`/`Cle_Patient_Norm` avant toute jointure (§5). |
+| **R8** Présences sans N° DA | 🟠 | jointure échouée figée vide | `Statut_Resolution="SANS DA"` + ligne rouge. |
+| **R9** Orphelins / DA non consommés | 🟡 | clés tronquées ; DA Poly non consommées (effet R1) | Validation `REF_Patients` + `CTRL_Qualite` ; R1 résolu supprime les 675 Poly. |
+| **R10** Doublons (N° DA + Date) | 🟡 | collages répétés / double saisie | `Doublon_Cle` + MFC + compteur `CTRL_Qualite`. |
+| **R11** *(nouveau)* Désalignement PQ inter-fichiers | 🔴 | **Chemin `Z:\…` + noms tables/colonnes exacts** des fichiers GP (espaces d'en-tête, struct. ETP≠Poly) → rupture totale au moindre écart | **PQ inter-fichiers supprimé** ; jointures intra-classeur par référence structurée ; en-têtes figés par le build (§6). **Disparaît par construction.** |
 
 ---
 
-## 8. Plan de construction pour le CONSTRUCTEUR
+## 9. Plan de construction v2 pour le CONSTRUCTEUR
 
-**Ce qui est scriptable openpyxl (build automatique, `build/build_workbook.py`) :**
+**Scriptable openpyxl (`build/build_workbook.py`) :**
+1. **Extraire les référentiels** vers `data/referentiels/*.csv` (seeds anonymisés) :
+   `patients.csv` (depuis **`GP_PATIENTS!Patients `**, colonnes A→N, **SANS la colonne Q `#REF!`** ; clé
+   `Recherche` recalculée), `cotations.csv`, **`tarifs.csv`** (5 valeurs réelles §4.1 : HJSN 32000, HJSA 32000,
+   HJSR 31000, HJSM 30000, HJST 27000), `regimes.csv` (avec `Facturable_CPS`, `Payeur`), `pathologies.csv`,
+   `provenances.csv`, `prescripteurs.csv`, `statuts.csv` (avec `Exclu_facturation`), `mouvements.csv`,
+   `programmation.csv` (avec `Compte_Present`), `groupes.csv`, `communes.csv` (depuis **`GP_PATIENTS!Parametres`**),
+   `motifs_*.csv`, **`categories_refus.csv`** (depuis `.xlsm!TabSuiviApi[Catégorie de Refus]`), `calendrier.csv`.
+2. **Créer les onglets `REF_*`** (ListObjects nommées `tPatients`, `tCotations`, `tTarif`, …), Arial, verrouillage.
+3. **Créer `DA`** : colonnes retenues + calculées (`Cle_Patient_Norm`, `Statut_Exclu`, `Doublon_N_DA`,
+   `Age_sejour`, `Nb_Je_consommes`), listes `REF_*`.
+4. **Créer `Saisie_Presences`** : 3+1 colonnes saisie + listes + colonnes calculées E→P (§5), MFC.
+5. **Créer `CONSO_Presences`** : dérivation par formule de `Saisie_Presences`.
+6. **Créer la couche Facturation** :
+   - `Suivi_Factures` (`tSuiviFactures`, 38 colonnes §4.2, formules `RECHERCHEX`/`COUNTIFS` intra-classeur) ;
+   - `Bordereaux` (`tBordereaux`, `SOMME.SI.ENS` §4.3) ;
+   - `Facture` (modèle imprimable §4.4, `RECHERCHEX` sur `tTarif`/`tSuiviFactures` ; option VBA
+     `ConvNumberLetter` — module1 reporté à l'identique si `.xlsm` cible accepté `[arbitrage]`).
+7. **Créer `CTRL_Qualite`** : compteurs d'anomalies + contrôles de cohérence facturation (§7.3).
+8. **Squelette `Cockpit`** (TCD posés à la main).
+9. **Recalcul/contrôle** : `python build/build_workbook.py --recalc` → **zéro erreur de formule**.
 
-1. **Extraire les référentiels** des fichiers source vers `data/referentiels/*.csv` (seeds, anonymisés) :
-   `patients.csv`, `cotations.csv`, `regimes.csv`, `pathologies.csv`, `provenances.csv`,
-   `prescripteurs.csv`, `statuts.csv` (avec colonne `Exclu_facturation`), `mouvements.csv`,
-   `programmation.csv` (avec colonne `Compte_Present`), `groupes.csv`, `communes.csv`, `motifs_*.csv`,
-   `calendrier.csv`. Source la plus riche = `EXCEL_POLYVALENT!Parametres` (17 tables) ∪ `EXCEL_ETP`
-   (`TabPatients␣`, `TabGpes`).
-2. **Créer les onglets `REF_*`** depuis les CSV, en **ListObjects** nommées (`tPatients`, `tCotations`, …),
-   police Arial, verrouillage (feuilles protégées admin).
-3. **Créer `DA`** : structure 44→colonnes retenues (§3.2), colonnes calculées (`Cle_Patient_Norm`,
-   `Statut_Exclu`, `Doublon_N_DA`, `Age_sejour`, `Nb_Je_consommes`), 8 listes déroulantes `REF_*`.
-4. **Créer `Saisie_Presences`** : 3 (+1 `Parcours`) colonnes de saisie + listes déroulantes + colonnes
-   calculées E→P (formules §3.3 / §4), MFC d'alerte.
-5. **Créer `CONSO_Presences`** : dérivation par formule de `Saisie_Presences` (v1).
-6. **Créer `Facturation`** : colonnes + formule `Eligible`/`Motif_rejet` (§6), tarifs vides.
-7. **Créer `CTRL_Qualite`** : compteurs d'anomalies.
-8. **Squelette `Cockpit`** (les TCD finaux sont posés à la main — openpyxl ne crée pas de TCD propre).
-9. **Recalcul/contrôle** : `python build/build_workbook.py --recalc` (LibreOffice si dispo) → vérifier
-   **zéro erreur de formule** (`#REF!`/`#N/A`/`#VALUE!`/`#NAME?`/`#DIV/0!`).
+**Manuel (hors openpyxl) :** import des données réelles (sensibles, jamais committées — RGPD-PF) ; TCD `Cockpit` ;
+[évolution] Power Query **intra-classeur** (`powerquery/*.pq`, jamais `Z:\…`) si bascule décidée ; option VBA
+`ConvNumberLetter` si format `.xlsm` retenu.
 
-**Ce qui reste manuel (hors openpyxl) :**
-
-- **Import des données réelles** (présences, registre DA) depuis les sources — données patients sensibles,
-  **jamais committées** (CLAUDE.md §2 ; RGPD-PF). Le dépôt ne contient que des seeds anonymisés.
-- **TCD `Cockpit`** : création/rafraîchissement dans Excel.
-- **[Évolution] Power Query** : coller le code M de `powerquery/*.pq` dans l'Éditeur avancé si bascule PQ
-  décidée (remplace alors la dérivation par formule de `CONSO_Presences`). Documenté dans
-  `docs/04_power_query.md`.
-
-**Livrables de la phase 4 (construction) :**
-
-- `build/build_workbook.py` (générateur) ;
-- `data/referentiels/*.csv` (seeds anonymisés, listés ci-dessus) ;
-- `output/ORA_ORA_SSR_v0.xlsx` (classeur structure, sans données réelles) ;
-- `powerquery/CONSO_Presences.pq` (+ `DA.pq` si besoin) — code M pour l'évolution PQ ;
-- `docs/04_power_query.md` (procédure de bascule) ; mise à jour `docs/03_dictionnaire_donnees.md`.
+**Livrables phase 4 :** `build/build_workbook.py` ; `data/referentiels/*.csv` (dont `tarifs.csv`,
+`categories_refus.csv`) ; `output/ORA_ORA_SSR_v0.xlsx` ; `powerquery/*.pq` (intra-classeur) ; `docs/04_power_query.md`.
 
 ---
 
-## 9. Risques & points ouverts
+## 10. Multi-utilisateurs (section honnête) `[arbitrage infrastructure ouvert]`
 
-- **🔴 Dépendance CPS non tranchée** (CLAUDE.md §7) : format/canal de transmission GDR-DSI inconnu. `Facturation`
-  reste un **bordereau interne** tant que non résolu. Tarifs JOPF des 5 cotations **non renseignés** (à
-  saisir dans `REF_Cotations`, ne pas inventer). Action hors-code prioritaire.
-- **`[arbitrage métier requis]` — maître ETP** : confirmer importer **`GP_ETP_1`** (origine préservée) et non
-  `EXCEL_ETP`.
-- **`[arbitrage métier requis]` — 4e colonne `Parcours` en saisie** : valider le geste, ou définir une valeur
-  par défaut. Sans elle, un patient présent sur les deux parcours ne peut être rattaché à la bonne DA.
-- **`[arbitrage] — validation Patient stricte vs avertissement** : refuser la saisie hors-liste (sécurise mais
-  bloque les nouveaux patients tant que `REF_Patients` n'est pas mis à jour) OU avertir sans bloquer.
-- **`[à confirmer]` — règles `Compte_Present`** (quelles Programmation comptent « présent » : `Présent` seul,
-  ou aussi `Attente CPS / Présent`, `Refus PEC / Présent` ?) et **`Facturable_CPS`** par régime.
-- **`[à confirmer]` — colonnes DA des refus** (`Motifs de refus CPS/OraOra`) : à conserver si l'analyse des
-  refus est un besoin métier.
-- **Volume Excel 365** : ~26 000 lignes de présence × `FILTER` par ligne est calculable mais lourd ; si la
-  latence gêne, basculer `CONSO_Presences` en **Power Query** (évolution prévue) résout aussi la performance.
-- **Décalage v1 formules vs PQ** : la v1 exige Excel **365** (fonctions `FILTRE`/`RECHERCHEX`/`LET`
-  dynamiques). `[à confirmer]` que toutes les assistantes disposent de 365 ; sinon, PQ devient nécessaire
-  dès v1.
+UN fichier unique sur **serveur de fichiers classique** = **un seul rédacteur à la fois** (verrouillage Excel).
+Aujourd'hui la saisie est déjà répartie sur **2 fichiers** (`GP ETP` / `GP POLYVALENT`) → 2 personnes peuvent
+saisir en parallèle ; un fichier unique **régresse** sur ce point si l'on reste en serveur de fichiers.
+Coédition réelle de **4 personnes simultanées** = **SharePoint/OneDrive** requis (cloud → **réserve RGPD données
+de santé en PF**, à arbitrer ; alternative = **SharePoint Server on-premise**). La **facturation est de toute
+façon mono-utilisateur** par nature (une personne traite le suivi/bordereaux/factures). Modèle d'exploitation
+réaliste :
+- soit **classeur unique** (saisie + facturation) sur SharePoint sécurisé (coédition, RGPD à valider) ;
+- soit **saisie éventuellement répartie** (2 classeurs de saisie comme aujourd'hui) + **1 classeur de facturation
+  consolidé** (mais on réintroduit une frontière inter-fichiers — à éviter si possible).
+
+`[arbitrage infrastructure ouvert]` — **non bloquant pour la conception du contenu** : l'architecture des onglets,
+jointures et formules ci-dessus est valable quel que soit le choix d'hébergement. Seule la modalité de partage
+(mono-poste vs SharePoint) reste à trancher avec la DSI.
+
+---
+
+## 11. Risques & points ouverts
+
+- **🔴 Dépendance CPS non tranchée** (CLAUDE.md §7) : **canal/format de transmission** GDR-DSI inconnu. Le
+  **modèle de facture existe déjà** (`Facture`, repris du `.xlsm`) et le **bordereau interne** est produit ; seul
+  le canal CPS final reste à confirmer. Action hors-code prioritaire.
+- **`[à vérifier JOPF]` — tarifs** : 32000/32000/31000/30000/27000 XPF relevés dans `.xlsm!TabTarif` ; confirmer
+  qu'ils correspondent au **dernier arrêté tarifaire** avant mise en facturation. **Ne pas modifier sans source.**
+- **`[à confirmer mapping]` — payeur CPS/SS/Autres** : RGS/RNS/RST→CPS, SS→SS, Auto-financement→Autres (§4.5) à
+  valider avec le métier ; impacte `REF_Regimes[Payeur]` et `Facturable_CPS`.
+- **`[arbitrage infrastructure ouvert]` — multi-utilisateurs** : serveur de fichiers (mono-rédacteur, régression
+  vs 2 fichiers actuels) vs SharePoint (coédition, réserve RGPD-PF). Voir §10.
+- **`[arbitrage]` — VBA `ConvNumberLetter`** : conserver le module VBA (→ classeur `.xlsm`) pour le montant en
+  lettres, ou le réécrire en formule pure (→ classeur `.xlsx` sans macro). Le reste de la facturation est
+  **100 % sans VBA**.
+- **`[à confirmer]` — `Compte_Present`** (quelles Programmation comptent « présent ») et **`Facturable_CPS`** par
+  régime ; **sémantique exacte de `AA = X/Z`** et de la colonne `Z Forcer la cellule` du suivi (override manuel).
+- **Volume Excel 365** : ~19 000–26 000 lignes × `FILTRE`/`RECHERCHEX` par ligne est calculable mais lourd ; si
+  latence, basculer `CONSO_Presences`/`Suivi_Factures` en **Power Query intra-classeur** (évolution prévue).
+- **Excel 365 requis** (`FILTRE`/`RECHERCHEX`/`LET` dynamiques) ; `[à confirmer]` que toutes les assistantes en
+  disposent, sinon PQ devient nécessaire dès v1.
+- **`[à confirmer]` — colonnes DA des refus** (`Motifs de refus CPS/OraOra`) : à conserver si analyse des refus
+  souhaitée (cohérent avec `REF_CategoriesRefus` du suivi).
