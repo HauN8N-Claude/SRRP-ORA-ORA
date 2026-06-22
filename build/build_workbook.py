@@ -23,6 +23,7 @@ import csv
 import os
 import sys
 import subprocess
+import datetime
 from openpyxl import Workbook
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -77,6 +78,37 @@ def read_csv(name):
 def to_bool(v):
     return True if str(v).strip().upper() in ("VRAI", "TRUE", "1") else False
 
+def coerce_value(v):
+    """Convertit une valeur CSV (texte) en type Excel natif :
+    date JJ/MM/AAAA -> datetime ; nombre -> int/float ; sinon texte. '' -> None."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s == "":
+        return None
+    if len(s) == 10 and s[2] == "/" and s[5] == "/":
+        try:
+            return datetime.datetime.strptime(s, "%d/%m/%Y")
+        except ValueError:
+            pass
+    try:
+        if s.lstrip("-").isdigit():
+            return int(s)
+        f = float(s)
+        return int(f) if f.is_integer() else f
+    except ValueError:
+        return s
+    return s
+
+def set_typed(cell, val):
+    """Écrit une valeur typée + format date si applicable, police de base."""
+    cv = coerce_value(val)
+    cell.value = cv
+    if isinstance(cv, datetime.datetime):
+        cell.number_format = "DD/MM/YYYY"
+    cell.font = F_BASE
+    return cell
+
 
 # --------------------------------------------------------------------------- #
 # Pose d'une table (ListObject) + style + Arial + en-têtes
@@ -117,10 +149,9 @@ def build_ref_sheet(wb, sheet, table_name, headers, rows, bool_cols=(), protect=
         for j, val in enumerate(r, start=1):
             h = headers[j - 1]
             if h in bool_cols:
-                ws.cell(row=i, column=j, value=to_bool(val))
+                ws.cell(row=i, column=j, value=to_bool(val)).font = F_BASE
             else:
-                ws.cell(row=i, column=j, value=val if val != "" else None)
-            ws.cell(row=i, column=j).font = F_BASE
+                set_typed(ws.cell(row=i, column=j), val)
     last = max(2, len(rows) + 1)
     add_table(ws, table_name, 1, len(headers), last)
     autosize(ws, headers)
@@ -175,7 +206,7 @@ def build():
     idx_rech = h.index("Recherche") + 1
     for i, r in enumerate(rows, start=2):
         for j, val in enumerate(r, start=1):
-            ws.cell(row=i, column=j, value=val if val != "" else None).font = F_BASE
+            set_typed(ws.cell(row=i, column=j), val)
         # Cle_Norm = normalisation de Recherche
         col_norm = len(h_pat)
         rech_ref = f"{get_column_letter(idx_rech)}{i}"
