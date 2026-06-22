@@ -712,13 +712,14 @@ def build_facture(wb):
     val("B16", "=" + XLOOKUP("B15", "tDA[N_DA]", "tDA[Nb_Je_Accorde]", "0"))
     lbl("A17", "Prestation :")
     val("B17", "=" + XLOOKUP("B14", "tTarif[Code_PEC]", "tTarif[Prestation]"))
-    lbl("A18", "Tarif unitaire :")
+    lbl("A18", "Tarif unitaire (1re ligne) :")
     val("B18", "=" + XLOOKUP("B14", "tTarif[Code_PEC]", "tTarif[Tarif_XPF]", "0"))
-    lbl("A19", "Nb de journées :")
-    val("B19", "=" + XLOOKUP("$B$3", "tSuiviFactures[N_DE_FACTURE]",
-                             "tSuiviFactures[Nb_journees]", "0"))
+    lbl("A19", "Nb de journées (total facture) :")
+    val("B19", '=SUMIFS(tSuiviFactures[Nb_journees],tSuiviFactures[N_DE_FACTURE],$B$3)')
     lbl("A21", "TOTAL :")
-    val("B21", '=IF(OR(B18="",B19=""),"",B18*B19)')
+    # TOTAL = somme de TOUTES les lignes de la facture (multi-semaines/multi-lignes),
+    # et non tarif x nb de la 1re ligne seulement (corrige le sous-comptage).
+    val("B21", '=IF($B$3="","",SUMIFS(tSuiviFactures[Montant],tSuiviFactures[N_DE_FACTURE],$B$3))')
     ws["B21"].font = Font(name=ARIAL, size=11, bold=True)
     lbl("A22", "Montant en lettres :")
     val("B22", '=IF(B21="","",MontantEnLettres(B21)&" FRANCS CFP")')
